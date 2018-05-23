@@ -1,0 +1,19 @@
+#!/usr/bin/perl
+
+while (<STDIN>)
+{
+   if ($_ =~ /TIMESTEP/)
+   {
+      $line = <STDIN>;
+      chomp $line;
+      @values = split (/\s+/,$line);
+      $timestep = $values[0];
+      $line = <STDIN>;
+      $line = <STDIN>;
+      $line = <STDIN>;
+      $line = <STDIN>;
+      @values = split (/\s+/,$line);
+      $latt = $values[1] - $values[0];
+      print STDOUT "timestep = $timestep  latt = $latt\n";
+   }
+}

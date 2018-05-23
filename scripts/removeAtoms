@@ -1,0 +1,473 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: removeAtoms
+# PURPOSE: This program removes atoms of a particular user-given atom
+#       type from a LAMMPS data file and adjust bond and angle
+#       information accordingly. A file called data.removeAtoms is printed.
+# UPDATED: Jan. 9, 2014
+# USAGE:
+#       Command line options:
+#           [-h] :: print help information
+#           -type <atomType1> [<atomType2> ...] :: type number(s) of atoms
+#                   to be removed
+#           -r|remove <numToRemove>|all :: removal type
+#               1. The integer type removes integer number of atoms
+#                  of type atomType.
+#               2. The all type (using the "all" keyword instead of an
+#                  integer) removes all atoms of type atomType.
+#           -data <datafile> :: read from data file datafile
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+
+use strict;
+use warnings;
+use diagnostics;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# Change as needed
+my $outfile = "data.removeAtoms";
+
+# Command line options
+my $help;
+my @typesRemv;
+my $numRemv;
+my $datafile;
+
+my @values;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+my $totAngles = 0;
+
+my $totAtomsNew; #number after atoms have been removed
+my $totBondsNew; #number after atoms have been removed
+my $totAnglesNew; #number after atoms have been removed
+
+my @atomTypes;
+my @bondTypes;
+my @angleTypes;
+my @molecules;
+my @charge;
+my @atomCoords;
+
+my @bonds;
+my @angles;
+
+my @atomComments;
+my @bondComments;
+my @angleComments;
+
+my @newID;
+my @newBondID;
+my @newAngleID;
+
+my @eligible;
+my @toRemove;
+my @typeRemv;
+my @nRemvTypes;
+
+#################################################
+# ********************************************* #
+#################################################
+# BEGIN PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+# Read command line arguments
+&readCommandLine;
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Open the file for writing
+if (! open OUT, '>', $outfile) {
+    print "Could not open file $outfile for writing.\n";
+    die "ABORTING.\n";
+}
+
+# Read the system
+if ($datafile) {
+    if (!$numRemv || !@typesRemv) {
+        print "You need to specify both the atom types of the atoms to be\n".
+              "removed and the number to remove. Here's some help info:\n\n";
+        &printHelp;
+    }
+
+    # Open the data file for reading
+    if (! open DATA, '<', $datafile) {
+        print "Could not open file $datafile for reading.\n";
+        die "ABORTING.\n";
+    }
+    
+    # Read data file
+    &readInput;
+    
+    # Close the data file
+    close DATA;
+} else {
+    print "No data file specified.\n";
+    die "ABORTING.\n";
+}
+
+# Remove atoms
+&removeAtoms;
+
+# Print the rest of the new data file
+&printOutput;
+
+# Print the new atoms and bonds
+&printSummary;
+
+# Close file for writing
+close OUT;
+
+#################################################
+# ********************************************* #
+#################################################
+# END PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to read command line options
+sub readCommandLine {
+    my $count = 0;
+
+    while ($count < scalar(@ARGV)) {
+        if (($ARGV[$count] eq "-h") || ($ARGV[$count] eq "-help")) {
+            $help = 1;
+        } elsif (($ARGV[$count] eq "-r") || ($ARGV[$count] eq "-remove")) {
+            $numRemv = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-type") {
+            while ($count < scalar(@ARGV)-1) {
+                if ($ARGV[$count+1] =~ /\A-/) {
+                    last;
+                } else {
+                    push(@typesRemv, $ARGV[++$count]);
+                }
+            }
+        } elsif ($ARGV[$count] eq "-data") {
+            $datafile = $ARGV[++$count];
+        } else {
+            print "Unknown command line parameter $ARGV[$count].\n";
+            die "ABORTING.\n";
+        }
+
+        if ($count > scalar(@ARGV)) {
+            print "Command line overrun.\n";
+            print "Check command line parameters for missing options.\n";
+            die "ABORTING.\n";
+        } else {
+            $count++;
+        }
+    }
+}
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: removeAtoms
+# PURPOSE: This program removes atoms of a particular user-given atom
+#       type from a LAMMPS data file and adjust bond and angle
+#       information accordingly. A file called data.removeAtoms is printed.
+# UPDATED: Jan. 9, 2014
+# USAGE:
+#       Command line options:
+#           [-h] :: print help information
+#           -type <atomType1> [<atomType2> ...] :: type number(s) of atoms
+#                   to be removed
+#           -r|remove <numToRemove>|all :: removal type
+#               1. The integer type removes integer number of atoms
+#                  of type atomType.
+#               2. The all type (using the "all" keyword instead of an
+#                  integer) removes all atoms of type atomType.
+#           -data <datafile> :: read from data file datafile
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to read the data file
+sub readInput {
+    # READ AND PRINT THE HEADER SECTION
+
+    {
+        # Read the title and blank line
+        my $line = <DATA>;
+        print OUT $line;
+        $line = <DATA>;
+        print OUT $line;
+
+        # Print the atoms/bonds/angles totals with a reminder to adjust
+        # after atoms have been removed
+        foreach my $i (1..3) {
+            $line = <DATA>;
+            chomp($line);
+            $line = $line . " <CHANGE AS NEEDED>\n";
+            print OUT $line;
+        }
+    }
+
+    # Read the rest of the way down to the Atoms section
+    while (my $line = <DATA>) {
+        if ($line =~ /\AAtoms\Z/) { last; }
+        print OUT $line;
+    }
+
+    # READ THE ATOMS SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totAtoms++;
+        @values = split(/\s+/, $line);
+
+        $molecules[$totAtoms] = $values[1];
+        $atomTypes[$totAtoms] = $values[2];
+        $charge[$totAtoms] = $values[3];
+        $atomCoords[$totAtoms][0] = $values[4];
+        $atomCoords[$totAtoms][1] = $values[5];
+        $atomCoords[$totAtoms][2] = $values[6];
+        if ($#values > 6) {
+            my $i = 7;
+            $atomComments[$totAtoms] = "$values[$i++]";
+            while ($i <= $#values) {
+                $atomComments[$totAtoms] .= " $values[$i++]";
+            }
+        }
+
+        foreach my $type (@typesRemv) {
+            if ($atomTypes[$totAtoms] == $type) {
+                push(@eligible, $totAtoms);
+            }
+        }
+    }
+
+    # READ THE BONDS SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totBonds++;
+        @values = split(/\s+/, $line);
+
+        $bondTypes[$totBonds] = $values[1];
+        $bonds[$totBonds] = [$values[2], $values[3]];
+        if ($#values > 3) {
+            my $i = 4;
+            $bondComments[$totBonds] = "$values[$i++]";
+            while ($i <= $#values) {
+                $bondComments[$totBonds] .= " $values[$i++]";
+            }
+        }
+    }
+
+    # READ THE ANGLES SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totAngles++;
+        @values = split(/\s+/, $line);
+
+        $angleTypes[$totAngles] = $values[1];
+        $angles[$totAngles] = [$values[2], $values[3], $values[4]];
+        if ($#values > 4) {
+            my $i = 5;
+            $angleComments[$totAngles] = "$values[$i++]";
+            while ($i <= $#values) {
+                $angleComments[$totAngles] .= " $values[$i++]";
+            }
+        }
+    }
+}
+
+# A subroutine to remove atoms
+sub removeAtoms {
+    # Initialize variables and arrays
+    $totAtomsNew = $totAtoms;
+    $totBondsNew = $totBonds;
+    $totAnglesNew = $totAngles;
+    foreach my $atom (1..$totAtoms) {
+        $toRemove[$atom] = 0;
+        $newID[$atom] = $atom;
+    }
+    foreach my $bond (1..$totBonds) {
+        $newBondID[$bond] = $bond;
+    }
+    foreach my $angle (1..$totAngles) {
+        $newAngleID[$angle] = $angle;
+    }
+    {
+        my $maxType = 0;
+        foreach my $type (@typeRemv) {
+            if ($maxType < $type) {
+                $maxType = $type;
+            }
+        }
+        for my $t (1..$maxType) {
+            $nRemvTypes[$t] = 0;
+        }
+    }
+
+    # Choose atoms to remove
+    if ($numRemv eq "all") {
+        foreach my $atom (@eligible) {
+            $toRemove[$atom] = 1;
+        }
+    } else {
+        my $nremv = $numRemv;
+        while ($nremv) {
+            my $index = rand(@eligible);
+            if (!$toRemove[$eligible[$index]]) {
+                $toRemove[$eligible[$index]] = 1;
+                $nremv--;
+            }
+        }
+    }
+
+    # Remove atoms
+    foreach my $atomID (1..$totAtoms) {
+        unless ($toRemove[$atomID]) { next; }
+
+        $nRemvTypes[$atomTypes[$atomID]]++;
+
+        $newID[$atomID] = 0;
+        $totAtomsNew--;
+        foreach my $atom (($atomID+1)..$totAtoms) {
+            if ($newID[$atom]) { $newID[$atom]--; }
+        }
+    }
+
+    # Remove bonds
+    foreach my $bondID (1..$totBonds) {
+        unless ($toRemove[$bonds[$bondID][0]] ||
+                $toRemove[$bonds[$bondID][1]]) { next; }
+
+        $newBondID[$bondID] = 0;
+        $totBondsNew--;
+        foreach my $bond (($bondID+1)..$totBonds) {
+            if ($newBondID[$bond]) { $newBondID[$bond]--; }
+        }
+    }
+
+    # Remove angles
+    foreach my $angleID (1..$totAngles) {
+        unless (  $toRemove[$angles[$angleID][0]] ||
+                  $toRemove[$angles[$angleID][1]] ||
+                  $toRemove[$angles[$angleID][2]]   ) { next; }
+
+        $newAngleID[$angleID] = 0;
+        $totAnglesNew--;
+        foreach my $angle (($angleID+1)..$totAngles) {
+            if ($newAngleID[$angle]) { $newAngleID[$angle]--; }
+        }
+    }
+}
+
+# A subroutine to print the rest of the new data file
+sub printOutput {
+    # Print the Atoms section
+    print OUT "Atoms\n\n";
+    foreach my $atom (1..$totAtoms) {
+        if (! $newID[$atom]) { next; }
+        print OUT "$newID[$atom] $molecules[$atom] $atomTypes[$atom] ".
+            "$charge[$atom] $atomCoords[$atom][0] $atomCoords[$atom][1] ".
+            "$atomCoords[$atom][2]";
+        if ($atomComments[$atom]) {
+            print OUT " $atomComments[$atom]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+    print OUT "\n";
+
+    # Print the Bonds section
+    print OUT "Bonds\n\n";
+    foreach my $bond (1..$totBonds) {
+        if (! $newBondID[$bond]) { next; }
+        print OUT "$newBondID[$bond] $bondTypes[$bond] ".
+            "$newID[$bonds[$bond][0]] $newID[$bonds[$bond][1]]";
+        if ($bondComments[$bond]) {
+            print OUT " $bondComments[$bond]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+    print OUT "\n";
+
+    # Print the Angles section
+    print OUT "Angles\n\n";
+    foreach my $angle (1..$totAngles) {
+        if (! $newAngleID[$angle]) { next; }
+        print OUT "$newAngleID[$angle] $angleTypes[$angle] ".
+            "$newID[$angles[$angle][0]] $newID[$angles[$angle][1]] ".
+            "$newID[$angles[$angle][2]]";
+        if ($angleComments[$angle]) {
+            print OUT " $angleComments[$angle]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+}
+
+# A subroutine to print a summary
+#print file names, num new bonds added (and per type, and to which atoms,etc.)
+sub printSummary {
+    print "\nChange NUMBER OF ATOMS in the header to: $totAtomsNew\n";
+    print "Change NUMBER OF BONDS in the header to: $totBondsNew\n";
+    print "Change NUMBER OF ANGLES in the header to: $totAnglesNew\n\n";
+
+    print "User input:\n";
+    print "\tRemove atom types :";
+    foreach my $type (@typesRemv) { print " $type"; }
+    print "\n";
+    print "\tNumber to remove: $numRemv\n\n";
+
+    my $rem = $totAtoms - $totAtomsNew;
+    print "totAtoms originally: $totAtoms\n";
+    print "totAtoms now: $totAtomsNew\n";
+    print "removed $rem atoms:\n";
+    foreach my $type (1..$#nRemvTypes) {
+        if ($nRemvTypes[$type]) {
+            print "\tType $type: $nRemvTypes[$type]\n";
+        }
+    }
+    print "\n";
+
+    $rem = $totBonds - $totBondsNew;
+    print "totBonds originally: $totBonds\n";
+    print "totBonds now: $totBondsNew\n";
+    print "removed $rem bonds\n\n";
+
+    $rem = $totAngles - $totAnglesNew;
+    print "totAngles originally: $totAngles\n";
+    print "totAngles now: $totAnglesNew\n";
+    print "removed $rem angles\n";
+}

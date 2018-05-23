@@ -1,0 +1,1480 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: writeData
+# PURPOSE: This program takes a PDB and writes a LAMMPS input data file.
+# UPDATED: Oct. 12, 2012
+# USAGE: This program needs an input file called 'input' and a PDB to run.
+#        If no input file is found, trying to execute this program will
+#        write an input file template which the user must then fill in.
+#        This template can also be generated with the "-i" command line
+#        argument.
+#            The PDB file should have the following format: In the ATOMs
+#        section, each line should have the following items in columns
+#        separated by whitespace (numbered by the column they appear in;
+#        things in columns not listed are discarded):
+#               1. ATOM (the word, in caps)
+#               2. atom number
+#               3. element (or other atom type identifier, like H_1 or H_2)
+#               7. x-coordinate
+#               8. y-coordinate
+#               9. z-coordinate
+#               11. charge
+#        In the BONDs section, each line should begin with "CONECT" in all
+#        caps. This should be followed by an atom number and then a list of
+#        atom numbers (separated by whitespace) of atoms bonded to that first
+#        atom. For example:
+#               CONECT 1 2 3 4 5
+#        means atoms 2, 3, 4, and 5 are bonded to atom 1. Note that the list
+#        of bonded atoms should go from low to high atom number. There can
+#        be multiple lines listing bonded atoms for some particular atom,
+#        but they must all have this form. For example, all the bonds for
+#        atom 1 might be listed like this:
+#               CONECT 1 2 3 4 5
+#               CONECT 1 6 7
+#            The input file contains information about the name of the PDB
+#        file to read from and the name of the data file to write to. It
+#        also contains necessary information about each of the atom types
+#        in the system so they can be recognized when read from the PDB.
+#            After reading the input file, this program reads atom and
+#        bonding information (if there is any) from the PDB. It uses this
+#        information to construct the "Atoms", "Bonds", and "Angles" (and,
+#        when I get around to writing the code for it, the "Dihedrals" and
+#        "Impropers") sections of the LAMMPS data file.
+#            This program uses files called 'bondCoeffs' and 'angleCoeffs'
+#        to write the coefficients sections for bonds and angles. Templates
+#        for these files are written if the user uses the command line
+#        options "-b" or "-a", respectively. If these files aren't found
+#        when this program is run, they will be written. In the place in
+#        the data file where the coefficients would go, there will be
+#        comments with the user-readable version of the name of the bond
+#        or angle coefficient (e.g. C-H or C-H-C) so the user can add them
+#        in by hand if they want. Alternatively, they can just fill out
+#        the bondCoeffs and angleCoeffs templates and run the program again.
+#            The "-v" command line argument can be used to add a section
+#        with random initial velocities to the data file. Atoms in the same
+#        molecule will have the same initial velocities.
+#        Optional command line arguments:
+#            -i [writes an 'input' file and exits the program]
+#            -b [writes a 'bondCoeffs' file and exits the program]
+#            -a [writes an 'angleCoeffs' file and exits the program]
+#            -v [turns on the option to write a "Velocitites" section]
+# CONTENTS: Jump to any of these sections by searching their name.
+#       USE MODULES
+#       DECLARE GLOBAL VARIABLES
+#       DEFINE SUBROUTINES
+#           printHelp
+#           writeInput
+#           writeBondInput
+#           writeAngleInput
+#           maxCoord
+#           minCoord
+#           minValue
+#           findTheIndex
+#           removeDuplicates
+#           writeVelocities
+#       READ COMMAND LINE
+#       READ INPUT FILE
+#       READ PDB FILE
+#       DEFINE BOX BOUNDARIES
+#       DEFINE MOLECULES
+#       DETERMINE BOND TYPES
+#       DETERMINE BOND COEFFICIENTS
+#       FIND ANGLES
+#       DETERMINE ANGLE TYPES
+#       DETERMINE ANGLE COEFFICIENTS
+#       WRITE VELOCITIES
+#       WRITE DATA FILE
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+use strict;
+use warnings;
+use diagnostics;
+use Getopt::Long;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# Command line information
+my $help;
+my $inputRequested = 0;
+my $inputWritten = 0;
+my $bondInputRequested = 0;
+my $bondInputWritten = 0;
+my $angleInputRequested = 0;
+my $angleInputWritten = 0;
+
+# File names (specified in input file)
+my $pdbFileName;
+my $dataFileName;
+
+my $writeVelocities;
+
+# Main header information
+my $title = 'title';
+my @values;
+my %comments;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+my $totAngles = 0;
+my $totDihedrals = 0;
+my $totImpropers = 0;
+
+my $totAtomTypes = 0;
+my $atomType;
+my $totBondTypes = 0;
+my $bondType;
+my $totAngleTypes = 0;
+my $angleType;
+my $totDihedralTypes = 0;
+my $dihedralType;
+my $totImproperTypes = 0;
+my $improperType;
+
+# Box Boundaries
+my $xlo;
+my $xhi;
+my $ylo;
+my $yhi;
+my $zlo;
+my $zhi;
+
+# Atoms section
+my $atomID;
+my @atomTypes;
+my @elements;
+my @moleculeID;
+my @atomCoords;
+my @charge;
+
+# Molecule definition section
+my @molecules;
+my $totMolecules = 0;
+my %moleculesSeen;
+
+# Bonds section
+my $bondID;
+my @bonds;
+my @bondTypes;
+my %bondTypeNames; #Keys: bond types; Values: H-C e.g.
+
+# Angles section
+my $angleID;
+my @angles;
+my @angleTypes;
+my %angleTypeNames; #Keys: angle types; Values: H-C-H e.g.
+
+# Masses section
+my @masses;
+
+# Pair coefficients section
+my $totPairCoeffs = 0;
+my @pairCoeffs;
+
+# Bond coefficients section
+my $bondCoeffsFile = 0; #Becomes 1 if a bond coeffs file is found
+my $bondCoeffsSection = 0; #Becomes 1 if bond information is found
+my $totBondCoeffs = 0;
+my @bondCoeffs;
+
+# Angle coefficients section
+my $angleCoeffsFile = 0; #Becomes 1 if a angle coeffs file is found
+my $angleCoeffsSection = 0; #Becomes 1 if angle information is found
+my $totAngleCoeffs = 0;
+my @angleCoeffs;
+
+# Write velocities section
+my @velocities;
+my %molSeen;
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: writeData
+# PURPOSE: This program takes a PDB and writes a LAMMPS input data file.
+# UPDATED: May. 30, 2012
+# USAGE: This program needs an input file called 'input' and a PDB to run.
+#        If no input file is found, trying to execute this program will
+#        write an input file template which the user must then fill in.
+#        This template can also be generated with the "-i" command line
+#        argument.
+#            The input file contains information about the name of the PDB
+#        file to read from and the name of the data file to write to. It
+#        also contains necessary information about each of the atom types
+#        in the system so they can be recognized when read from the PDB.
+#            After reading the input file, this program reads atom and
+#        bonding information (if there is any) from the PDB. It uses this
+#        information to construct the "Atoms", "Bonds", and "Angles" (and,
+#        when I get around to writing the code for it, the "Dihedrals" and
+#        "Impropers") sections of the LAMMPS data file.
+#            This program uses files called 'bondCoeffs' and 'angleCoeffs'
+#        to write the coefficients sections for bonds and angles. Templates
+#        for these files are written if the user uses the command line
+#        options "-b" or "-a", respectively. If these files aren't found
+#        when this program is run, they will be written. In the place in
+#        the data file where the coefficients would go, there will be
+#        comments with the user-readable version of the name of the bond
+#        or angle coefficient (e.g. C-H or C-H-C) so the user can add them
+#        in by hand if they want. Alternatively, they can just fill out
+#        the bondCoeffs and angleCoeffs templates and run the program again.
+#            The "-v" command line argument can be used to add a section
+#        with random initial velocities to the data file. Atoms in the same
+#        molecule will have the same initial velocities.
+#        Optional command line arguments:
+#            -i [writes an 'input' file and exits the program]
+#            -b [writes a 'bondCoeffs' file and exits the program]
+#            -a [writes an 'angleCoeffs' file and exits the program]
+#            -v [turns on the option to write a "Velocitites" section]
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to generate a blank input file for the user to fill out
+# This is printed if no input file is found or if the user requests it with
+# the -i or -input command line arguments
+sub writeInput {
+    # Open input file for writing
+    if (! open INPUT, '>', 'input') {
+        die "Cannot open input file for writing: $!";
+    } else { select INPUT; }
+
+    print "This is the input file template for the LAMMPS data file ";
+    print "generation\nprogram writeData. Fill in the blanks with the ";
+    print "appropriate values.\n\nRequired values are noted with *.\n\n";
+
+    print "List pair coefficient terms separated by whitespace.\n\n";
+
+    print "Title:\nPDB file name*:\nData file name:\n\n";
+
+    print "Add as many of the following sections as you need to cover all ";
+    print "your\natom types.\n\n";
+
+    print "ATOM TYPE: 1\nElement*:\nMass:\nPair Coeffs:\n\n";
+    print "ATOM TYPE: 2\nElement*:\nMass:\nPair Coeffs:";
+
+    select STDOUT;
+
+    #The stuff below here controls the program flow in the case of multiple
+    #input files being requested. It's ugly, but it makes sure the program
+    #writes only what was requested and then exits nicely.
+    $inputWritten = 1;
+
+    if ($bondInputRequested) {
+        if ($bondInputWritten) {
+            if ($angleInputRequested) {
+                if ($angleInputWritten) {
+                    #If both bond and angle input files were requested and
+                    #have been written: exit the program
+                    exit;
+                } else {
+                    #If both bond and angle input files were requested but
+                    #only the bonds file has been written: return
+                    return;
+                }
+            } else {
+                #If only a bond input file was requested and it has been
+                #written: exit the program
+                exit;
+            }
+        } else {
+            #If a bond input file was requested and hasn't been written:
+            #return
+            return;
+        }
+    } elsif ($angleInputRequested) {
+        if ($angleInputWritten) {
+            #If both angle and bond input files were requested and have
+            #been written: exit the program
+            exit;
+        } else {
+            #If both angle and bond input files were requested but only
+            #the bond file has been written: return
+            return;
+        }
+    } else {
+        #If neither bond nor angle files were requested: exit the program
+        exit;
+    }
+}
+
+# A subroutine to write a bond coefficients template file for the user to
+# fill out
+sub writeBondInput {
+    # Open bond coeffs file for writing
+    if (! open BONDCOEFFS, '>', 'bondCoeffs') {
+        die "Cannot open bond coeffs file for writing: $!";
+    } else { select BONDCOEFFS; }
+
+    print "This is the bond coefficients template file. Fill in the bond ";
+    print "coefficients\nfor each bond type. List coefficients separated ";
+    print "by whitespace in front\nof the hash.\n\n";
+
+    if ($totBondTypes > 0) {
+        foreach my $bondType (1..$totBondTypes) {
+            print "BOND TYPE $bondType: #$bondTypeNames{$bondType}\n";
+        }
+    } else {
+        print "BOND TYPE 1: #element1-element2\n";
+    }
+
+    select STDOUT;
+
+    #The stuff below here controls the program flow in the case of multiple
+    #input files being requested. It's ugly, but it makes sure the program
+    #writes only what was requested and then exits nicely.
+    $bondInputWritten = 1;
+
+    if ($inputRequested) {
+        if ($inputWritten) {
+            if ($angleInputRequested) {
+                if ($angleInputWritten) {
+                    #If both input and angle input files were requested and
+                    #have been written: exit the program
+                    exit;
+                } else {
+                    #If both input and angle input files were requested but
+                    #only the input file has been written: return
+                    return;
+                }
+            } else {
+                #If only an input input file was requested and it has been
+                #written: exit the program
+                exit;
+            }
+        } else {
+            #If an input input file was requested and hasn't been written:
+            #return
+            return;
+        }
+    } elsif ($angleInputRequested) {
+        if ($angleInputWritten) {
+            #If both angle and input input files were requested and have
+            #been written: exit the program
+            exit;
+        } else {
+            #If both angle and input input files were requested but only
+            #the input file has been written: return
+            return;
+        }
+    } elsif (!$bondInputRequested) {
+        #If neither input nor angle files were requested and a bond coeffs
+        #input file was not found but also not requested: return
+        return;
+    } else {
+        #If neither input nor angle files were requested but a bond file
+        #was: exit the program
+        exit;
+    }
+}
+
+# A subroutine to write and angle coefficients template file for the user to
+# fill out
+sub writeAngleInput {
+    # Open angle coeffs file for writing
+    if (! open ANGLECOEFFS, '>', 'angleCoeffs') {
+        die "Cannot open angle coeffs file for writing: $!";
+    } else { select ANGLECOEFFS; }
+
+    print "This is the angle coefficients template file. Fill in the ";
+    print "angle\ncoefficients for each angle type. List coefficients ";
+    print "separated by\nwhitespace in front of the hash.\n\n";
+
+    if ($totAngleTypes > 0) {
+        foreach my $angleType (1..$totAngleTypes) {
+            print "ANGLE TYPE $angleType: #$angleTypeNames{$angleType}\n";
+        }
+    } else {
+        print "ANGLE TYPE 1: #element1-element2-element3\n";
+    }
+
+    select STDOUT;
+
+    #The stuff below here controls the program flow in the case of multiple
+    #input files being requested. It's ugly, but it makes sure the program
+    #writes only what was requested and then exits nicely.
+    $angleInputWritten = 1;
+
+    if ($inputRequested) {
+        if ($inputWritten) {
+            if ($bondInputRequested) {
+                if ($bondInputWritten) {
+                    #If both input and bond input files were requested and
+                    #have been written: exit the program
+                    exit;
+                } else {
+                    #If both input and bond input files were requested but
+                    #only the input file has been written: return
+                    return;
+                }
+            } else {
+                #If only an input input file was requested and it has been
+                #written: exit the program
+                exit;
+            }
+        } else {
+            #If an input input file was requested and hasn't been written:
+            #return
+            return;
+        }
+    } elsif ($bondInputRequested) {
+        if ($bondInputWritten) {
+            #If both bond and input input files were requested and have
+            #been written: exit the program
+            exit;
+        } else {
+            #If both bond and input input files were requested but only
+            #the input file has been written: return
+            return;
+        }
+    } elsif (!$angleInputRequested) {
+        #If neither input nor bond files were requested and a angle coeffs
+        #input file was not found but also not requested: return
+        return;
+    } else {
+        #If neither input nor bond files were requested but a bond file
+        #was: exit the program
+        exit;
+    }
+}
+
+# A subroutine to find the maximum coordinate value
+sub maxCoord {
+    #Takes an axis number as input
+    #0 is the x-axis (first column in the data file)
+    #1 is the y-axis (second column in the data file)
+    #2 is the z-axis (third column in the data file)
+    my $axis = shift(@_);
+    #Compare all the coordinate values in the column for that axis and find
+    #the maximum
+    my $max_so_far = $atomCoords[1][$axis];
+    foreach $atomID (1..$totAtoms) {
+        if ($atomCoords[$atomID][$axis] > $max_so_far) {
+            $max_so_far = $atomCoords[$atomID][$axis];
+        }
+    }
+    #Return a scalar value: the maximum coordinate value for the specified
+    #axis
+    return $max_so_far;
+}
+
+# A subroutine to find the minimum coordinate value
+sub minCoord {
+    #Takes an axis number as input
+    #0 is the x-axis (first column in the data file)
+    #1 is the y-axis (second column in the data file)
+    #2 is the z-axis (third column in the data file)
+    my $axis = shift(@_);
+    #Compare all the coordinate values in the column for that axis and find
+    #the minimum
+    my $min_so_far = $atomCoords[1][$axis];
+    foreach $atomID (1..$totAtoms) {
+        if ($atomCoords[$atomID][$axis] < $min_so_far) {
+            $min_so_far = $atomCoords[$atomID][$axis];
+        }
+    }
+    #Return a scalar value: the minimum coordinate value for the specified
+    #axis
+    return $min_so_far;
+}
+
+# A subroutine to find the smallest value in an array
+# This is more general than the minCoord above. I should probably go back and
+# rewrite that subroutine so I just have one "min" subroutine. Another time.
+sub minValue {
+    #Takes an array as input
+    my $min_so_far = shift(@_);
+    #Compare all the values of an array to all the other values and find
+    #the minimum value
+    foreach my $value (@_) {
+        if ($value < $min_so_far) {
+            $min_so_far = $value;
+        }
+    }
+    #Return the minimum value of the input array
+    return $min_so_far;
+}
+
+# A subroutine to find all the indices of a particular item in an array
+# This subroutine takes an array which has duplicate values at different
+# indices and finds all the indices where a particular value occurs and
+# returns them.
+sub findTheIndex {
+    #Takes the value you want to find the indices for and the array you want
+    #to search through as input
+    my($item, @array) = @_;
+    my @indices;
+    #Look at each value in the input array
+    foreach my $index (0..$#array) {
+        #Some of the values might be undefined, so this "if" just keeps "use
+        #strict" from twitting us all the time
+        if ($array[$index]) {
+            #If the value matches your input value, add its index to an array
+            #to be returned
+            if ($item eq $array[$index]) {
+                push(@indices, $index);
+            }
+        }
+    }
+    #Returns an array of the indices of the input array where the value
+    #you were looking for was found
+    return @indices;
+}
+
+# A subroutine to remove duplicates from a list
+# I also added a crude sort at the end to make debugging easier. I may
+# comment it out later.
+sub removeDuplicates {
+    my %seen;
+    my @newArray;
+    my @oldArray = @_;
+    foreach my $item (@oldArray) {
+        #Add each value to an array to be returned only if it has not already
+        #been "seen"
+        unless ($seen{$item}) {
+            push(@newArray, $item);
+            $seen{$item} = 1;
+        }
+    }
+    @newArray = sort(@newArray); #An unnecessary sort
+    #Returns an array with duplicates removed
+    return @newArray;
+}
+
+# A subroutine to write the velocities section of the data file
+# This is optional and must be turned on with the command line arguments
+# "-v" or "-velocities" (see the help information).
+sub writeVelocities{
+    foreach my $atomID (1..$totAtoms) {
+        my $molecule = $molecules[$atomID];
+
+        if ($molecule == 0) {
+            #If the molecule number is zero, it means the atom isn't bonded
+            #to anything (it's not really in a molecule), so just give it
+            #a random velocity and move on.
+            $velocities[$atomID][0] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+            $velocities[$atomID][1] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+            $velocities[$atomID][2] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+
+        } else {
+            #If the molecule the current atom belongs to has already been
+            #seen, give the atom the velocity given to all the atoms in that
+            #molecule (the components of which are stored in an array
+            #referenced by the molecule number in the %molSeen hash).
+            if ($molSeen{$molecule}) {
+                $velocities[$atomID][0] = $molSeen{$molecule}[0];
+                $velocities[$atomID][1] = $molSeen{$molecule}[1];
+                $velocities[$atomID][2] = $molSeen{$molecule}[2];
+
+            #If the molecule the current atom belongs to hasn't yet been
+            #seen, generate a random velocity for that molecule and store its
+            #components in an array referenced under it's molecule number in
+            #the %molSeen hash. Then add those velocity components to the
+            #@velocities array under the index equal to the atom's atomID.
+            } else {
+                $molSeen{$molecule}[0] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+                $molSeen{$molecule}[1] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+                $molSeen{$molecule}[2] = sprintf "%.3f", ( rand(0.6) - 0.2 );
+
+                $velocities[$atomID][0] = $molSeen{$molecule}[0];
+                $velocities[$atomID][1] = $molSeen{$molecule}[1];
+                $velocities[$atomID][2] = $molSeen{$molecule}[2];
+            }
+        }
+    }
+}
+
+#################################################
+# **********************************************
+#################################################
+# **********************************************
+#
+# THE MAIN PART OF THE PROGRAM
+#
+# **********************************************
+#################################################
+# **********************************************
+#################################################
+
+#################################################
+# READ COMMAND LINE
+#################################################
+
+# Read command line arguments and check if help has been requested
+GetOptions ('h|help' => \$help, 'i|input' => \$inputRequested,
+    'b|bonds' => \$bondInputRequested, 'a|angles' => \$angleInputRequested,
+    'velocities|v' => \$writeVelocities);
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Print input template file if requested
+if ($inputRequested) { &writeInput; }
+
+# Print bond input template file if requested
+if ($bondInputRequested) { &writeBondInput; }
+
+# Print angle input template file if requested
+if ($angleInputRequested) { &writeAngleInput; }
+
+#################################################
+# READ INPUT FILE
+#################################################
+
+# Open input file for reading
+if (! open INPUTFILE, '<', 'input') {
+    warn "Warning: Cannot find an input file to read. Creating one now.\n";
+    &writeInput;
+}
+
+# Read title
+while (my $line = <INPUTFILE>) {
+    chomp($line);
+    if ($line =~ /\ATitle:/) {
+        @values = split(/: /, $line);
+        if ($values[1]) { $title = $values[1]; }
+        last;
+    }
+}
+
+# Read PDB file name
+while (my $line = <INPUTFILE>) {
+    chomp($line);
+    if ($line =~ /\APDB file name\*:/) {
+        @values = split(/: /, $line);
+        $pdbFileName = $values[1];
+        last;
+    }
+}
+
+# Read name of data file to write to
+while (my $line = <INPUTFILE>) {
+    chomp($line);
+    if ($line =~ /\AData file name:/) {
+        @values = split(/: /, $line);
+        if ($values[1]) { $dataFileName = $values[1]; }
+        last;
+    }
+}
+
+# Read atom types and their information
+while (my $line = <INPUTFILE>) {
+    chomp($line);
+    if ($line =~ /\AATOM TYPE: \d+\z/) {
+        #Read type number
+        @values = split(/:\s+/, $line);
+        $totAtomTypes++;
+        $atomType = $values[1];
+    } elsif ($line =~ /\AElement\*:/) {
+        #Read element
+        @values = split(/:\s+/, $line);
+        $elements[$atomType] = $values[1];
+    } elsif ($line =~ /\AMass:/) {
+        #Read mass
+        @values = split(/:\s+/, $line);
+        if ($values[1]) {
+            $masses[$atomType] = $values[1];
+        }
+    } elsif ($line =~ /\APair Coeffs:/) {
+        #Read pair coeffs
+        @values = split(/:\s+/, $line);
+        if ($values[1]) {
+            my @coeffs = split(/\s+/, $values[1]);
+            $totPairCoeffs = @coeffs;
+            $pairCoeffs[$atomType] = [ @coeffs ];
+        }
+    }
+}
+
+#################################################
+# READ PDB FILE
+#################################################
+
+# Open PDB file for reading
+if (! open PDBFILE, '<', $pdbFileName) {
+    die "Cannot open PDB file for reading: $!";
+}
+
+while (my $line = <PDBFILE>) {
+    chomp($line);
+    if ($line =~ /\AATOM/) {
+        #Read atoms section
+        #Depending on the form of your PDB, you may need to edit this a
+        #bit. As is, this works for a PDB with the following column order
+        #(where a "column" is anything bounded by whitespace: so something
+        #like "MOL H" counts as two columns):
+        #1. "ATOM"; 2. atom number; 3. element; 7. x-coord; 8. y-coord;
+        #9. z-coord; 11. charge
+        @values = split(/\s+/, $line);
+        $atomID = $values[1];
+        $totAtoms++;
+
+        my $element = $values[2];
+        #Assign atom types based on the atom's element. If you need
+        #multiple types per element, you can write your own program to
+        #go through the data file this program prints and edit it
+        #accordingly or you can change element names for atoms you want
+        #to have a different type (e.g. you might change the elements column
+        #in your PDB to have both C1 and C2, rather than just C. This
+        #program will then treat them as different atom types. Just be sure
+        #to include them both in your input file.)
+        ($atomTypes[$atomID]) = &findTheIndex($element, @elements);
+
+        $atomCoords[$atomID][0] = $values[6];
+        $atomCoords[$atomID][1] = $values[7];
+        $atomCoords[$atomID][2] = $values[8];
+
+        $charge[$atomID] = $values[10];
+    } elsif ($line =~ /\ACONECT/) {
+        #Read bonds section
+        #This section assumes the bonds section has the form: "CONECT"
+        #followed by an atom number, which is in turn followed by numbers
+        #for all the atoms bonded to it.
+        @values = split(/\s+/, $line);
+        shift(@values); #Throw away "CONECT"
+        my $bonder = shift(@values);
+        foreach my $bondee (@values) {
+            if ($bondee > $bonder) {
+                #This assumes you already recorded the bond in the line
+                #listing the bonded atoms for $bonder if $bonder is less
+                #than $bondee. It skips those bonds to avoid doubling up.
+                $totBonds++;
+                $bonds[$totBonds] = [ $bonder, $bondee ];
+            }
+        }
+    }
+}
+
+#################################################
+# DEFINE BOX BOUNDARIES
+#################################################
+
+# Find the lowest and highest coordinate value along each axis (0 for the
+# x-axis, 1 for the y-axis, 2 for the z-axis) and define these as the box
+# boundaries
+
+$xhi = &maxCoord(0);
+$yhi = &maxCoord(1);
+$zhi = &maxCoord(2);
+
+$xlo = &minCoord(0);
+$ylo = &minCoord(1);
+$zlo = &minCoord(2);
+
+#################################################
+# DEFINE MOLECULES
+#################################################
+
+# This section uses the information from the bonds section to determine
+# which atoms are in which molecules and uses that to rewrite the molecules
+# column of information in the atoms section. It is also used if the option
+# to write a velocities section has been selected to make sure all the atoms
+# in the same molecule have the same velocity (so the molecule isn't trying
+# to pull itself apart).
+
+# An array called @molecules is created where each index corresponds to an
+# atomID (index 0 isn't used). Each value is the molecule number of the atom
+# referenced by the index.
+#     The list of bonds is read through by bondID and both atoms are placed
+# in a molecule named after the smaller atomID of the two atoms. For example,
+# if atoms 3 and 12 were in the current bond being read, the value of the
+# array @molecules at both indices 3 and 12 (the atoms) would be set to 3
+# (the molecule).
+#     As the bonds are read, some atoms will have a molecule already listed
+# in @molecules at their corresponding index from a previous bond. In this
+# case, the subroutine &findTheIndex is called to find the indices (atoms)
+# of all the instances of this molecule. This will return a list of all the
+# atoms (index = atomID) currently in this molecule. The two atoms in the
+# bond being considered are added to this list and the smallest atomID in
+# the list is determined. This smallest atomID becomes the new name (i.e.
+# number; "molecule name" = "molecule number") of the molecule containing
+# all these atoms. The values (molecule names) at the indices in @molecules
+# corresponding to each of these atoms is then rewritten with the new
+# molecule name. After looping over all the bonds, each value of @molecules
+# will hold the molecule number for the molecule containing the atom
+# referenced by its index.
+#     After that, you have a bunch of molecules named things like "3", "57",
+# etc. when there maybe isn't a molecule "2" or "14", so to make things a
+# little nicer-looking, we go back and rename all the molecules again with
+# contiguous numbers starting with "1". This just involves a loop over all
+# the values of @molecules with a variable $totMolecules counting up each
+# time a new value (molecule name) is found along with a hash to keep track
+# of old molecule names and corresponding new molecule names (see below).
+
+foreach $bondID (1..$totBonds) {
+    #Declare some variables
+    my $loAtom;
+    my $hiAtom;
+    my $oldMolecule;
+    my $oldMolecule1;
+    my $oldMolecule2;
+    my $newMolecule;
+    my @atomsToChange;
+
+    #Find which atomID is smaller (we'll use this for the name of the
+    #molecule containing both atoms)
+    if ($bonds[$bondID][0] < $bonds[$bondID][1]) {
+        $loAtom = $bonds[$bondID][0];
+        $hiAtom = $bonds[$bondID][1];
+    } else {
+        $loAtom = $bonds[$bondID][1];
+        $hiAtom = $bonds[$bondID][0];
+    }
+
+    if (!$molecules[$loAtom]) {
+
+        if (!$molecules[$hiAtom]) {
+            #If there's no molecule listed for either atom in the bond
+            #being considered, name the molecule containing them with the
+            #number of the lower of the two atomIDs
+            $molecules[$loAtom] = $loAtom;
+            $molecules[$hiAtom] = $loAtom;
+
+        } elsif ($molecules[$hiAtom]) {
+            #If there's no molecule listed for the atom with the lower
+            #atomID but there IS a molecule listed for the atom with the
+            #higher atomID: name that listed molecule $oldMolecule
+            $oldMolecule = $molecules[$hiAtom];
+
+            #The new molecule name will be the lower of that old name and
+            #the lower atomID of the current two atoms (effectively the
+            #lowest atomID of all the atoms in the molecule)
+
+            #The subroutine &minValue is used to find the minimum value of
+            #an array (in this case, the array in question contains only
+            #the old molecule name and the current low atomID)
+            $newMolecule = &minValue($loAtom, $oldMolecule);
+
+            #The subroutine &findTheIndex is used to find all the atoms
+            #(index = atomID) in @molecules that belong to molecules named
+            #after $oldMolecule or either of the two new atoms. All these
+            #atoms (including the two new ones) are put in an array called
+            #@atomsToChange
+            @atomsToChange = ($loAtom, $hiAtom);
+            push(@atomsToChange, &findTheIndex($loAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($hiAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($oldMolecule, @molecules));
+            #Remove any duplicate atoms from @atomsToChange
+            @atomsToChange = &removeDuplicates(@atomsToChange);
+
+            #For each atom in @atomsToChange, change the molecule name at
+            #the corresponding index in @molecules to the new molecule name
+            foreach my $atom (@atomsToChange) {
+                $molecules[$atom] = $newMolecule;
+            }
+        }
+
+    } elsif ($molecules[$loAtom]) {
+        if (!$molecules[$hiAtom]) {
+            #If there's no molecule listed for the atom with the higher
+            #atomID but there IS a molecule listed for the atom with the
+            #lower atomID: name that listed molecule $oldMolecule
+            $oldMolecule = $molecules[$loAtom];
+
+            #The new molecule name will be the lower of that old name and
+            #the lower atomID of the current two atoms (effectively the
+            #lowest atomID of all the atoms in the molecule)
+
+            #The subroutine &minValue is used to find the minimum value of
+            #an array (in this case, the array in question contains only
+            #the old molecule name and the current low atomID)
+            $newMolecule = &minValue($loAtom, $oldMolecule);
+
+            #The subroutine &findTheIndex is used to find all the atoms
+            #(index = atomID) in @molecules that belong to molecules named
+            #after $oldMolecule or either of the two new atoms. All these
+            #atoms (including the two new ones) are put in an array called
+            #@atomsToChange
+            @atomsToChange = ($loAtom, $hiAtom);
+            push(@atomsToChange, &findTheIndex($loAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($hiAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($oldMolecule, @molecules));
+            #Remove any duplicate atoms from @atomsToChange
+            @atomsToChange = &removeDuplicates(@atomsToChange);
+
+            #For each atom in @atomsToChange, change the molecule name at
+            #the corresponding index in @molecules to the new molecule name
+            foreach my $index (@atomsToChange) {
+                $molecules[$index] = $newMolecule;
+            }
+
+        } elsif ($molecules[$hiAtom]) {
+            #If there are molecules listed for BOTH the atom with the
+            #higher atomID AND the atom with the lower atomID: name those
+            #listed atoms $oldMolecule1 and $oldMolecule2
+            $oldMolecule1 = $molecules[$loAtom];
+            $oldMolecule2 = $molecules[$hiAtom];
+
+            #The new molecule name will be the lowest of the two old names
+            #and the lower atomID of the current two atoms (effectively the
+            #lowest atomID of all the atoms in the molecule)
+
+            #The subroutine &minValue is used to find the minimum value of
+            #an array (in this case, the array in question contains both of
+            #the old molecule names and the current low atomID)
+            $newMolecule = &minValue($loAtom, $oldMolecule1, $oldMolecule2);
+
+            #The subroutine &findTheIndex is used to find all the atoms
+            #(index = atomID) in @molecules that belong to molecules named
+            #after $oldMolecule1, $oldMolecule2, or either of the two new
+            #atoms. All these atoms (including the two new ones) are put in
+            #an array called @atomsToChange
+            @atomsToChange = ($loAtom, $hiAtom);
+            push(@atomsToChange, &findTheIndex($loAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($hiAtom, @molecules));
+            push(@atomsToChange, &findTheIndex($oldMolecule1, @molecules));
+            push(@atomsToChange, &findTheIndex($oldMolecule2, @molecules));
+            #Remove any duplicate atoms from @atomsToChange
+            @atomsToChange = &removeDuplicates(@atomsToChange);
+
+            #For each atom in @atomsToChange, change the molecule name at
+            #the corresponding index in @molecules to the new molecule name
+            foreach my $atom (@atomsToChange) {
+                $molecules[$atom] = $newMolecule;
+            }
+        }
+
+    }
+
+}
+
+# Label any atoms that haven't been added to a molecule (i.e. atoms that
+# aren't bonded to anything) as being in molecule number "0".
+foreach my $atom (1..$totAtoms) {
+    if (!$molecules[$atom]) {
+        $molecules[$atom] = 0;
+    }
+}
+
+# Rename the molecules with contiguous numbers starting with "1"
+
+# As the atoms in @molecules are looped over, $totMolecules counts up
+# whenever a molecule name is "seen" for the first time. When this happens,
+# a new key with the name of that molecule is created in the hash
+# %moleculesSeen which corresponds to a value holding the current
+# $totMolecules. The molecule for that atom is then renamed with the value
+# of $totMolecules.
+#     If the molecule name being considered has already been seen (i.e.
+# there exists a key with its name in %moleculesSeen), $totMolecules is not
+# increased and the molecule for the current atom is renamed with the
+# value corresponding to the hash key that shares a name with the current
+# molecule. (That is, the molecule can't be renamed to the current value of
+# $totMolecules--it has to be renamed to what $totMolecules was when the
+# first atom in the current molecule was considered--a value which is stored
+# in %moleculesSeen.
+foreach my $atom (1..$totAtoms) {
+    if ($molecules[$atom]) {
+        #Skip the atoms that don't belong to a molecule (molecule "0")
+        if ($moleculesSeen{$molecules[$atom]}) {
+            #If the old molecule name has already been seen, look in
+            #%moleculesSeen for the new molecule name
+            $molecules[$atom] = $moleculesSeen{$molecules[$atom]};
+        } else {
+            #If the old molecule has not been seen yet, icrease $totMolecules
+            #and name the new molecule the value of $totMolecules. Also, create
+            #a key with the old molecule name in %moleculesSeen holding this
+            #value of $totMolecules.
+            $totMolecules++;
+            $moleculesSeen{$molecules[$atom]} = $totMolecules;
+            $molecules[$atom] = $totMolecules;
+        }
+    }
+}
+
+# Replace the old molecule numbers read in the atoms section with the new
+# ones determined here
+foreach $atomID (1..$totAtoms) {
+    $moleculeID[$atomID] = $molecules[$atomID];
+}
+
+#################################################
+# DETERMINE BOND TYPES
+#################################################
+
+# If there are bonds in the system, bond types need to be determined. First,
+# the array of all the elements is used to find all the possible different
+# combinations of elements that could make a bond. Then, duplicate possible
+# bond types are removed (i.e. C-H is the same as H-C and so one must be
+# removed from the list of bond types.
+
+# Make an array called @possibleBondTypes holding all the possible
+# combinations of the different elements
+if ($totBonds > 0) {
+    my @possibleBondTypes = ();
+    foreach my $element1 (@elements) {
+        if (!$element1) { next; }
+        foreach my $element2 (@elements) {
+            if (!$element2) { next; }
+            push(@possibleBondTypes, [$element1, $element2]);
+        }
+    }
+    unless (@bondTypes) {
+        #Don't run this if bond types have already been determined (from
+        #the bondCoeffs input file)
+        my %seen;
+        foreach my $bond (0..$#possibleBondTypes) {
+            #Sort the elements in each bond (in preparation for removing
+            #duplicate bonds of the type C-H and H-C)
+            my @sortedElements = sort(@{$possibleBondTypes[$bond]});
+            my $element1 = $sortedElements[0];
+            my $element2 = $sortedElements[1];
+            if (!$seen{"$element1 $element2"}) {
+                #If the current bond type (combination of elements) hasn't
+                #been seen: increase the number of bond types
+                $totBondTypes++;
+                my $typeFound = 0;
+                foreach my $bondID (1..$totBonds) {
+                    my $atom1 = $bonds[$bondID][0];
+                    my $atom2 = $bonds[$bondID][1];
+                    #Go through each bond and see if the elements of the
+                    #atoms in the bond match the element combination of the
+                    #current bond type being considered. If they do, give
+                    #the bond the current $totBondTypes bond type.
+                    if ($elements[$atomTypes[$atom1]] eq $element1) {
+                        if ($elements[$atomTypes[$atom2]] eq $element2) {
+                            $bondTypes[$bondID] = $totBondTypes;
+                            $typeFound = 1;
+                        }
+                    } elsif ($elements[$atomTypes[$atom1]] eq $element2) {
+                        if ($elements[$atomTypes[$atom2]] eq $element1) {
+                            $bondTypes[$bondID] = $totBondTypes;
+                            $typeFound = 1;
+                        }
+                    }
+                }
+                if ($typeFound) {
+                    #If at least one bondID was found to have the current
+                    #bond type being considered, mark that bond type as
+                    #seen by adding it to the %seen hash. Also record the
+                    #human-readable name of the bond type (i.e. something
+                    #like C-H as opposed to just a type number).
+                    $seen{"$element1 $element2"} = $totBondTypes;
+                    $bondTypeNames{$totBondTypes} = "$element1\-$element2";
+                } else {
+                    #Since $totBondTypes is icreased as soon as each new
+                    #bond type is considered, it must be decreased back by
+                    #that amount if no bond was found to have that type.
+                    $totBondTypes--;
+                }
+            }
+        }
+    }
+}
+
+#################################################
+# DETERMINE BOND COEFFICIENTS
+#################################################
+
+# Open coefficients file it if it exists, otherwise print a template
+# If the bondCoeffs file isn't found, the bond coeffs section will still
+# be written to the data file, but none of the coefficients will be
+# included. Instead, there will be comments showing the user-readable
+# name of the bond type (e.g. #C-H).
+if ($totBonds > 0) {
+    if (open BONDCOEFFS, '<', 'bondCoeffs') {
+        $bondCoeffsFile = 1;
+    } else {
+        &writeBondInput;
+    }
+}
+
+# Read the bond coeffs file (if it exists)
+if ($bondCoeffsFile) {
+    while (my $line = <BONDCOEFFS>) {
+        unless ($totBonds > 0) { last; }
+        chomp($line);
+        if ($line =~ /\ABOND TYPE \d+:/) {
+            @values = split(/:\s+/, $line);
+            my @typeValues = split(/\s+/, $values[0]);
+            my $bondType = $typeValues[2];
+            my @coeffsValues = split(/\s+/, $values[1]);
+            $totBondCoeffs = ((scalar @coeffsValues) - 1);
+            foreach my $coeff (@coeffsValues) {
+                unless ($coeff =~ /\A#/) {
+                    push(@{$bondCoeffs[$bondType]}, $coeff);
+                }
+            }
+        }
+    }
+}
+
+#################################################
+# FIND ANGLES
+#################################################
+
+my %seenAngles;
+foreach my $atom1_i (1..$totAtoms) {
+    my @bondedAtoms = ();
+    my ($atom1, $atom3);
+    foreach my $bond (1..$totBonds) {
+        if ($bonds[$bond][0] == $atom1_i) {
+            push(@bondedAtoms, $bonds[$bond][1]);
+        } elsif ($bonds[$bond][1] == $atom1_i) {
+            push(@bondedAtoms, $bonds[$bond][0]);
+        } else {
+            next;
+        }
+    }
+    foreach my $atom2 (@bondedAtoms) {
+        foreach my $bond (1..$totBonds) {
+            if ($bonds[$bond][0] == $atom2) {
+                unless ($bonds[$bond][1] == $atom1_i) {
+                    my $atom3_i = $bonds[$bond][1];
+                    if ($atom3_i < $atom1_i) {
+                        ($atom1, $atom3) = ($atom3_i, $atom1_i);
+                    } else {
+                        ($atom1, $atom3) = ($atom1_i, $atom3_i);
+                    }
+                    if (!$seenAngles{"$atom1 $atom2 $atom3"}) {
+                        $seenAngles{"$atom1 $atom2 $atom3"} = 1;
+                        $totAngles++;
+                        $angles[$totAngles] = [$atom1, $atom2, $atom3];
+                    }
+                }
+            } elsif ($bonds[$bond][1] == $atom2) {
+                unless ($bonds[$bond][0] == $atom1_i) {
+                    my $atom3_i = $bonds[$bond][0];
+                    if ($atom3_i < $atom1_i) {
+                        ($atom1, $atom3) = ($atom3_i, $atom1_i);
+                    } else {
+                        ($atom1, $atom3) = ($atom1_i, $atom3_i);
+                    }
+                    if (!$seenAngles{"$atom1 $atom2 $atom3"}) {
+                        $seenAngles{"$atom1 $atom2 $atom3"} = 1;
+                        $totAngles++;
+                        $angles[$totAngles] = [$atom1, $atom2, $atom3];
+                    }
+                }
+            } else {
+                next;
+            }
+        }
+    }
+}
+
+#################################################
+# DETERMINE ANGLE TYPES
+#################################################
+
+if ($totAngles > 0) {
+    my @possibleAngleTypes = ();
+    foreach my $element1 (@elements) {
+        if (!$element1) { next; }
+        foreach my $element2 (@elements) {
+            if (!$element2) { next; }
+            foreach my $element3 (@elements) {
+                if (!$element3) { next; }
+                push(@possibleAngleTypes, [$element1, $element2, $element3]);
+            }
+        }
+    }
+    unless (@angleTypes) {
+        my %seen;
+        foreach my $angle (0..$#possibleAngleTypes) {
+            my $element1_i = $possibleAngleTypes[$angle][0];
+            my $element2 = $possibleAngleTypes[$angle][1];
+            my $element3_i = $possibleAngleTypes[$angle][2];
+            my ($element1, $element3) = sort($element1_i, $element3_i);
+            if (!$seen{"$element1 $element2 $element3"}) {
+                $totAngleTypes++;
+                my $typeFound = 0;
+                foreach my $angleID (1..$totAngles) {
+                    my $atom1 = $angles[$angleID][0];
+                    my $atom2 = $angles[$angleID][1];
+                    my $atom3 = $angles[$angleID][2];
+                    if ($elements[$atomTypes[$atom1]] eq $element1) {
+                        if ($elements[$atomTypes[$atom2]] eq $element2) {
+                            if ($elements[$atomTypes[$atom3]] eq $element3) {
+                                $angleTypes[$angleID] = $totAngleTypes;
+                                $typeFound = 1;
+                            }
+                        }
+                    } elsif ($elements[$atomTypes[$atom1]] eq $element3) {
+                        if ($elements[$atomTypes[$atom2]] eq $element2) {
+                            if ($elements[$atomTypes[$atom3]] eq $element1) {
+                                $angleTypes[$angleID] = $totAngleTypes;
+                                $typeFound = 1;
+                            }
+                        }
+                    }
+                }
+                if ($typeFound) {
+                    $seen{"$element1 $element2 $element3"} = $totAngleTypes;
+                    $angleTypeNames{$totAngleTypes} =
+                        "$element1\-$element2\-$element3";
+                } else {
+                    $totAngleTypes--; #If no angles of that type were found
+                }
+            }
+        }
+    }
+}
+
+#################################################
+# DETERMINE ANGLE COEFFICIENTS
+#################################################
+
+# Open coefficients file it if it exists, otherwise print a template
+if ($totAngles > 0) {
+    if (open ANGLECOEFFS, '<', 'angleCoeffs') {
+        $angleCoeffsFile = 1;
+    } else {
+        &writeAngleInput;
+    }
+}
+
+# Read the angle coeffs file (if it exists)
+if ($angleCoeffsFile) {
+    while (my $line = <ANGLECOEFFS>) {
+        unless ($totAngles > 0) { last; }
+        chomp($line);
+        if ($line =~ /\AANGLE TYPE \d+:/) {
+            @values = split(/: /, $line);
+            my @typeValues = split(/\s+/, $values[0]);
+            my $angleType = $typeValues[2];
+            my @coeffsValues = split(/\s+/, $values[1]);
+            $totAngleCoeffs = ((scalar @coeffsValues) - 1);
+            foreach my $coeff (@coeffsValues) {
+                unless ($coeff =~ /\A#/) {
+                    push(@{$angleCoeffs[$angleType]}, $coeff);
+                }
+            }
+        }
+    }
+}
+
+#################################################
+# WRITE VELOCITIES (if option is specified)
+#################################################
+
+# This writes a velocities section
+# Turn on this option with a command line argument (see help information)
+if ($writeVelocities) { &writeVelocities; }
+
+#################################################
+# WRITE THE DATA FILE
+#################################################
+
+# Open data file for writing
+if (! open DATAFILE, '>', $dataFileName) {
+    die "Cannot open data file $dataFileName for writing: $!";
+}
+
+# Print header information
+
+# Title and blank line
+print DATAFILE "$title\n\n";
+
+# Total number of atoms, bonds, angles, dihedrals, and impropers
+print DATAFILE "$totAtoms atoms\n";
+print DATAFILE "$totBonds bonds\n";
+print DATAFILE "$totAngles angles\n";
+print DATAFILE "$totDihedrals dihedrals\n";
+print DATAFILE "$totImpropers impropers\n";
+
+# Blank line
+print DATAFILE "\n";
+
+# Total number of atom, bond angle, dihedral, and improper types
+print DATAFILE "$totAtomTypes atom types\n";
+
+if ($totBondTypes > 0) {
+    print DATAFILE "$totBondTypes bond types\n";
+}
+
+if ($totAngleTypes > 0) {
+    print DATAFILE "$totAngleTypes angle types\n";
+}
+
+if ($totDihedralTypes > 0) {
+    print DATAFILE "$totDihedralTypes dihedral types\n";
+}
+
+if ($totImproperTypes > 0) {
+    print DATAFILE "$totImproperTypes improper types\n";
+}
+
+# Blank line
+print DATAFILE "\n";
+
+# Print the box boundaries
+print DATAFILE "$xlo $xhi xlo xhi";
+if ($comments{xlo_xhi}) {
+    print DATAFILE " $comments{xlo_xhi}\n";
+} else {
+    print DATAFILE "\n";
+}
+
+print DATAFILE "$ylo $yhi ylo yhi";
+if ($comments{ylo_yhi}) {
+    print DATAFILE " $comments{ylo_yhi}\n";
+} else {
+    print DATAFILE "\n";
+}
+
+print DATAFILE "$zlo $zhi zlo zhi";
+if ($comments{zlo_zhi}) {
+    print DATAFILE " $comments{zlo_zhi}\n";
+} else {
+    print DATAFILE "\n";
+}
+
+# Blank line
+print DATAFILE "\n";
+
+# Print the masses section
+print DATAFILE "Masses\n\n";
+
+if (@masses) {
+    foreach $atomType (1..$totAtomTypes) {
+        print DATAFILE "$atomType $masses[$atomType] ";
+        print DATAFILE "#$elements[$atomType]\n";
+    }
+} else {
+    foreach $atomType (1..$totAtomTypes) {
+        print DATAFILE "$atomType #$elements[$atomType]\n";
+    }
+}
+
+# Finish masses section with a blank line
+print DATAFILE "\n";
+
+# Print the pair coefficients section
+print DATAFILE "Pair Coeffs\n\n";
+
+if ($totPairCoeffs > 0) {
+    foreach my $atomType (1..$totAtomTypes) {
+        print DATAFILE "$atomType ";
+        while (@{$pairCoeffs[$atomType]}) {
+            my $coeff = shift(@{$pairCoeffs[$atomType]});
+            print DATAFILE "$coeff ";
+            if (!@{$pairCoeffs[$atomType]}) {
+                print DATAFILE "#$elements[$atomType]\n";
+            }
+        }
+    }
+} else {
+    warn "Warning: No pair coeffs found\n";
+    foreach my $atomType (1..$totAtomTypes) {
+        print DATAFILE "$atomType #$elements[$atomType]\n";
+    }
+}
+
+# Finish pair coeffs section with a blank line
+print DATAFILE "\n";
+
+# Print the bond coefficients section
+if (@bonds) {
+    print DATAFILE "Bond Coeffs\n\n";
+
+    if ($totBondCoeffs > 0) {
+        foreach my $bondType (1..$totBondTypes) {
+            print DATAFILE "$bondType ";
+            while (@{$bondCoeffs[$bondType]}) {
+                my $coeff = shift(@{$bondCoeffs[$bondType]});
+                print DATAFILE "$coeff ";
+                if (!@{$bondCoeffs[$bondType]}) {
+                    print DATAFILE "#$bondTypeNames{$bondType}\n";
+                }
+            }
+        }
+    } else {
+        foreach my $bondType (1..$totBondTypes) {
+            print DATAFILE "$bondType #$bondTypeNames{$bondType}\n";
+        }
+    }
+
+    # Finish bond coeffs section with a blank line
+    print DATAFILE "\n";
+}
+
+# Print the angle coefficients section
+if (@angles) {
+    print DATAFILE "Angle Coeffs\n\n";
+
+    if ($totAngleCoeffs > 0) {
+        foreach my $angleType (1..$totAngleTypes) {
+            print DATAFILE "$angleType ";
+            while (@{$angleCoeffs[$angleType]}) {
+                my $coeff = shift(@{$angleCoeffs[$angleType]});
+                print DATAFILE "$coeff ";
+                if (!@{$angleCoeffs[$angleType]}) {
+                    print DATAFILE "#$angleTypeNames{$angleType}\n";
+                }
+            }
+        }
+    } else {
+        foreach my $angleType (1..$totAngleTypes) {
+            print DATAFILE "$angleType #$angleTypeNames{$angleType}\n";
+        }
+    }
+
+    # Finish angle coeffs section with a blank line
+    print DATAFILE "\n";
+}
+
+# Print the atoms section
+print DATAFILE "Atoms\n\n";
+
+foreach $atomID (1..$totAtoms) {
+    print DATAFILE "$atomID $moleculeID[$atomID] $atomTypes[$atomID] ";
+    print DATAFILE "$charge[$atomID] $atomCoords[$atomID][0] ";
+    print DATAFILE "$atomCoords[$atomID][1] $atomCoords[$atomID][2] ";
+    print DATAFILE "#$elements[$atomTypes[$atomID]]\n";
+}
+
+# Finish atoms section with a blank line
+print DATAFILE "\n";
+
+# Print the velocities section (optional)
+if ($writeVelocities) {
+    print DATAFILE "Velocities\n\n";
+
+    foreach $atomID (1..$totAtoms) {
+        print DATAFILE "$atomID $velocities[$atomID][0] ";
+        print DATAFILE "$velocities[$atomID][1] $velocities[$atomID][2] ";
+        print DATAFILE "#$elements[$atomTypes[$atomID]]\n";
+    }
+
+    #Finish velocities section with a blank line
+    print DATAFILE "\n";
+}
+
+# Print the bonds section
+if ($totBonds > 0) {
+    print DATAFILE "Bonds\n\n";
+
+    foreach my $bondID (1..$totBonds) {
+        print DATAFILE "$bondID $bondTypes[$bondID] ";
+        print DATAFILE "$bonds[$bondID][0] $bonds[$bondID][1] ";
+        print DATAFILE "#$bondTypeNames{$bondTypes[$bondID]}\n";
+    }
+
+    # Finish bonds section with a blank line
+    print DATAFILE "\n";
+}
+
+# Print the angles section
+if ($totAngles > 0) {
+    print DATAFILE "Angles\n\n";
+
+    foreach my $angleID (1..$totAngles) {
+        print DATAFILE "$angleID $angleTypes[$angleID] ";
+        print DATAFILE "$angles[$angleID][0] $angles[$angleID][1] ";
+        print DATAFILE "$angles[$angleID][2] ";
+        print DATAFILE "#$angleTypeNames{$angleTypes[$angleID]}\n";
+    }
+
+    # Finish angles section with a blank line
+    print DATAFILE "\n";
+}
+

@@ -1,0 +1,41 @@
+#
+# Beginning structure for amorphous boron carbide
+#
+
+# All the atoms from diferent molecules will be separated at least 2.0
+# Anstroms at the solution.
+
+seed 11110
+
+tolerance 15.0
+
+# The file type of input and output files is xyz
+
+filetype pdb
+
+# The name of the output file
+
+output noBonds.pdb
+
+# molecules will be put in a box
+# defined by the minimum coordinates x, y and z = 0. 0. 0. and maximum
+# coordinates 40. 40. 40. That is, they will be put in a cube of side
+# 40. (the keyword "inside cube 0. 0. 0. 40.") could be used as well.
+
+#A.
+structure B10C2H12.pdb
+  number 94 
+  inside cube 0.0 0.0 0.0 100.0
+end structure
+
+#B.
+structure CH3CH3.pdb
+  number 4
+  inside cube 0.0 0.0 0.0 100.0 
+end structure
+
+#C.
+structure CH4.pdb
+  number 4
+  inside cube 0.0 0.0 0.0 100.0
+end structure

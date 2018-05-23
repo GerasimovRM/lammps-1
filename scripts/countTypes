@@ -1,0 +1,128 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: countTypes
+# PURPOSE: This program counts the number of atoms of each atom type in a
+#       LAMMPS data file.
+# UPDATED: Jan. 9, 2014
+# USAGE:
+#       Command line arguments:
+#           [-h|help] : print help information
+#           -dat|data dataFile : data file name
+#       Redirect output with STDOUT.
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+use strict;
+use warnings;
+use diagnostics;
+use Getopt::Long;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# Command line information
+my $help;
+
+my $dataFileName;
+
+# Processing
+my @values;
+
+my @numEachType = 0;
+my $maxTypeNumber = 0;
+
+my $totAtoms = 0;
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: countTypes
+# PURPOSE: This program counts the number of atoms of each atom type in a
+#       LAMMPS data file.
+# UPDATED: Jan. 9, 2014
+# USAGE:
+#       Command line arguments:
+#           [-h|help] : print help information
+#           -dat|data dataFile : data file name
+#       Redirect output with STDOUT.
+#################################################
+ENDHELP
+exit;
+}
+
+#################################################
+# **********************************************
+#################################################
+# **********************************************
+#
+# THE MAIN PART OF THE PROGRAM
+#
+# **********************************************
+#################################################
+# **********************************************
+#################################################
+
+#################################################
+# READ COMMAND LINE
+#################################################
+
+# Read command line arguments and check if help has been requested
+GetOptions ('h|help' => \$help, 'dat|data:s' => \$dataFileName);
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Open data file for reading
+if (! open DATAFILE, '<', $dataFileName) {
+    die "Unable to open the data file\n";
+}
+
+# Move to the Atoms section
+while (my $line = <DATAFILE>) {
+    if ($line =~ /\AAtoms\Z/i) {
+        last;
+    }
+}
+
+<DATAFILE>; #Throw away next line (which is blank)
+
+#Read the Atoms section
+while (my $line = <DATAFILE>) {
+    if ($line =~ /\A(?:\s+)?\Z/) { last; }
+    chomp($line);
+
+    $totAtoms++;
+
+    @values = split(/\s+/, $line);
+
+    if ($values[2] > $maxTypeNumber) {
+        $maxTypeNumber = $values[2];
+    }
+
+    $numEachType[$values[2]]++;
+}
+
+foreach my $type (1..$maxTypeNumber) {
+    if (!$numEachType[$type]) {
+        $numEachType[$type] = 0;
+    }
+}
+
+#################################################
+# RRINT A SUMMARY
+#################################################
+
+print "Total atoms: $totAtoms\n";
+print "Total number of types: $#numEachType\n\n";
+
+foreach my $type (1..$#numEachType) {
+    print "Total atoms of type $type: $numEachType[$type]\n";
+}

@@ -1,0 +1,479 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: dump2data
+# PURPOSE: This program uses LAMMPS coordinate, bond, and angle dump
+#       files to write the skeleton of a new data (input) file. The
+#       Atoms, Bonds, Angles, and box dimensions are filled in, but
+#       things like the bond, pair, and angle types are left for the
+#       user to fill in.
+# UPDATED: Dec. 20, 2013
+# USAGE: Command line options:
+#       [-h] :: print help information
+#       -dump dumpfile :: read from coordinate dumpfile
+#       -bond bondfile :: read from bond dumpfile
+#       -angle anglefile :: read from angle dumpfile
+#       EITHER {
+#           -f :: integer frame number (-1 = last frame)
+#       } OR {
+#           -t :: timestep
+#       }
+#       [-n] :: name of output data file
+#       [-title] :: name of output data file
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+
+use strict;
+use warnings;
+use diagnostics;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+my $datafile = "data.file";
+my $title = "title";
+
+# Command line options
+my $help;
+
+# File names
+my $dumpfile;
+my $bondfile;
+my $anglefile;
+
+my @values;
+
+my $frame;
+my $timestep;
+my @timesteps;
+my $totFrames = 0;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+my $totAngles = 0;
+
+my @atomTypes;
+my @bondTypes;
+my @angleTypes;
+my @atomCoords;
+my @bonds;
+my @angles;
+
+my $xlo;
+my $xhi;
+my $ylo;
+my $yhi;
+my $zlo;
+my $zhi;
+
+#################################################
+# ********************************************* #
+#################################################
+# BEGIN PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+# Read command line arguments
+&readCommandLine;
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Open data file for writing
+if (! open DATA, '>', $datafile) {
+    print "Could not open file $datafile for writing.\n";
+    die "ABORTING.\n";
+}
+
+# Read the system
+if ($dumpfile) {
+    if ($bondfile && $anglefile) {
+        if (!$frame && !$timestep) {
+            print "To read from dump file, must specify either frame " .
+                  "or timestep.\n";
+            die "ABORTING.\n";
+        }
+
+        # Open the files for reading
+        if (! open DUMPFILE, '<', $dumpfile) {
+            print "Could not open file $dumpfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if (! open BONDFILE, '<', $bondfile) {
+            print "Could not open file $bondfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if (! open ANGLEFILE, '<', $anglefile) {
+            print "Could not open file $anglefile for reading.\n";
+            die "ABORTING.\n";
+        }
+
+        # Read and write
+        &readDumpFile;
+        &writeAtoms;
+
+        &readWriteBonds;
+        &readWriteAngles;
+
+        &printTotals;
+
+        # Close the files
+        close DUMPFILE;
+        close BONDFILE;
+        close ANGLEFILE;
+    } else {
+        print "No bond or angle dump file specified with coord dump file.\n";
+        die "ABORTING.\n";
+    }
+} else {
+    print "No dump file specified.\n";
+    die "ABORTING.\n";
+}
+
+# Close file for writing
+close DATA;
+
+#################################################
+# ********************************************* #
+#################################################
+# END PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to read command line options
+sub readCommandLine {
+    my $count = 0;
+
+    while ($count < scalar(@ARGV)) {
+        if (($ARGV[$count] eq "-h") || ($ARGV[$count] eq "-help")) {
+            $help = 1;
+        } elsif ($ARGV[$count] eq "-dump") {
+            $dumpfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-bond") {
+            $bondfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-angle") {
+            $anglefile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-f") {
+            $frame = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-t") {
+            $timestep = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-n") {
+            $datafile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-title") {
+            $title = $ARGV[++$count];
+        } else {
+            print "Unknown command line parameter $ARGV[$count].\n";
+            die "ABORTING.\n";
+        }
+
+        if ($count > scalar(@ARGV)) {
+            print "Command line overrun.\n";
+            print "Check command line parameters for missing options.\n";
+            die "ABORTING.\n";
+        } else {
+            $count++;
+        }
+    }
+}
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: dump2data
+# PURPOSE: This program uses LAMMPS coordinate, bond, and angle dump
+#       files to write the skeleton of a new data (input) file. The
+#       Atoms, Bonds, Angles, and box dimensions are filled in, but
+#       things like the bond, pair, and angle types are left for the
+#       user to fill in.
+# UPDATED: Dec. 20, 2013
+# USAGE: Command line options:
+#       [-h] :: print help information
+#       -dump dumpfile :: read from coordinate dumpfile
+#       -bond bondfile :: read from bond dumpfile
+#       -angle anglefile :: read from angle dumpfile
+#       EITHER {
+#           -f :: integer frame number (-1 = last frame)
+#       } OR {
+#           -t :: timestep
+#       }
+#       [-n] :: name of output data file
+#       [-title] :: name of output data file
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to read a timestep from a dump file
+sub readDumpFile {
+    # READ DUMP FILE
+
+    # Find the total number of frames and match them with their timestep
+    # numbers in @timesteps (the frame number is the index and the timestep
+    # number is the value)
+    my $sawTimestep = 0;
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /TIMESTEP/) {
+            $totFrames++;
+            $sawTimestep = 1;
+        } elsif ($sawTimestep == 1) {
+            chomp($line);
+            $timesteps[$totFrames] = $line;
+            $sawTimestep = 0;
+        }
+    }
+
+    # Check the requested timestep or frame number and put either in terms
+    #of both the frame number and the timestep (i.e. set both $frame and
+    #$timestep to the correct values
+    if ($frame) {
+        if (($frame > $totFrames) || ($frame < 0 - $totFrames)) {
+            print "Frame $frame out of range.\n";
+            die "ABORTING.\n";
+        }
+
+        #If a negative frame number is given
+        if ($frame =~ /\A-/) {
+            $frame = $totFrames + ($frame + 1);
+            $timestep = $timesteps[$frame];
+        }
+
+        #If a positive frame number is given
+        $timestep = $timesteps[$frame];
+
+    } elsif ($timestep) {
+        my $found = 0;
+        foreach my $step (1..$totFrames) {
+            if ($timesteps[$step] == $timestep) {
+                $frame = $step;
+                $found = 1;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep not found\n";
+            die "ABORTING.\n";
+        }
+    } else {
+        print "Must specify either a timestep or a frame number to read " .
+              "the dumpfile.\n";
+        die "ABORTING.\n";
+    }
+
+    # Go back to the beginning of the dump file
+    seek(DUMPFILE,0,0);
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /\A$timestep\Z/) { last; }
+    }
+
+    # Move the cursor down to the number of atoms section for that
+    # timestep
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /NUMBER OF ATOMS/) { last; }
+    }
+
+    # The next line tells the number of atoms
+    $totAtoms = <DUMPFILE>;
+    chomp($totAtoms);
+
+    # Move the cursor down to the box bounds section for that
+    # timestep
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /BOX BOUNDS/) { last; }
+    }
+
+    # The next three lines tell the box bounds
+
+    {
+        my $line = <DUMPFILE>;
+        @values = split(/\s+/,$line);
+        $xlo = $values[0];
+        $xhi = $values[1];
+
+        $line = <DUMPFILE>;
+        @values = split(/\s+/,$line);
+        $ylo = $values[0];
+        $yhi = $values[1];
+
+        $line = <DUMPFILE>;
+        @values = split(/\s+/,$line);
+        $zlo = $values[0];
+        $zhi = $values[1];
+
+    }
+
+    # Move the cursor down to the start of the atom coords section for that
+    # timestep
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /\AITEM: ATOMS/) { last; }
+    }
+
+    # Read to the end of the timestep
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at beginning of next frame
+        chomp($line);
+
+        @values = split(/\s+/, $line);
+
+        my $atomID = $values[0];
+        my $atomtype = $values[1];
+
+        $atomTypes[$atomID] = $atomtype;
+        $atomCoords[$atomID][0] = $values[2];
+        $atomCoords[$atomID][1] = $values[3];
+        $atomCoords[$atomID][2] = $values[4];
+    }
+}
+
+# A subroutine to write the header and atoms section
+sub writeAtoms {
+    # WRITE HEADER INFORMATION
+
+    print DATA "$title | $timestep\n\n";
+
+    print DATA "$totAtoms atoms\n";
+    print DATA "totBonds bonds\n";
+    print DATA "totAngles angles\n";
+    print DATA "0 dihedrals\n";
+    print DATA "0 impropers\n\n";
+
+    print DATA "numTypes atom types\n";
+    print DATA "numBondTypes bond types\n";
+    print DATA "numAngleTypes angle types\n\n";
+
+    print DATA "3 extra bond per atom\n\n";
+
+    print DATA "$xlo $xhi xlo xhi\n";
+    print DATA "$ylo $yhi ylo yhi\n";
+    print DATA "$zlo $zhi zlo zhi\n\n";
+
+    print DATA "Masses\n\n";
+    print DATA "!!! MASSES GO HERE !!!\n\n";
+
+    print DATA "Pair Coeffs\n\n";
+    print DATA "!!! PAIR COEFFS GO HERE !!!\n\n";
+
+    print DATA "Bond Coeffs\n\n";
+    print DATA "!!! BOND COEFFS GO HERE !!!\n\n";
+
+    print DATA "Angle Coeffs\n\n";
+    print DATA "!!! ANGLE COEFFS GO HERE !!!\n\n";
+
+    # WRITE ATOMS SECTION
+
+    print DATA "Atoms\n\n";
+
+    foreach my $atom (1..$totAtoms) {
+        print DATA "$atom 0 $atomTypes[$atom] 0.00 $atomCoords[$atom][0] " .
+                   "$atomCoords[$atom][1] $atomCoords[$atom][2]\n";
+    }
+    print DATA "\n";
+}
+
+# A subroutine to read and write the bonds
+sub readWriteBonds {
+    # READ BONDS DUMP FILE AND WRITE BONDS SECTION
+
+    # Move the read cursor to the correct timestep in the bondfile
+    {
+        my $found = 0;
+        while (my $line = <BONDFILE>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $bondfile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    # Move the cursor down to the number of entries section for that
+    # timestep
+    while (my $line = <BONDFILE>) {
+        if ($line =~ /NUMBER OF ENTRIES/) { last; }
+    }
+
+    # The next line tells the number of bonds
+    $totBonds = <BONDFILE>;
+    chomp($totBonds);
+
+    # Move to the bonds section of that timestep or frame
+    while (my $line = <BONDFILE>) {
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame while writing to the data file
+    print DATA "Bonds\n\n";
+    while (my $line = <BONDFILE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+
+        print DATA "$line";
+    }
+    print DATA "\n";
+}
+
+# A subroutine to read and write the angles
+sub readWriteAngles {
+    # READ ANGLES DUMP FILE AND WRITE ANGLES SECTION
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the anglefile
+    {
+        my $found = 0;
+        while (my $line = <ANGLEFILE>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $anglefile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    # Move the cursor down to the number of entries section for that
+    # timestep
+    while (my $line = <ANGLEFILE>) {
+        if ($line =~ /NUMBER OF ENTRIES/) { last; }
+    }
+
+    # The next line tells the number of angle
+    $totAngles = <ANGLEFILE>;
+    chomp($totAngles);
+
+    # Move to the angles section of that timestep or frame
+    while (my $line = <ANGLEFILE>) {
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame
+    print DATA "Angles\n\n";
+    while (my $line = <ANGLEFILE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+
+        print DATA "$line";
+    }
+}
+
+# A subroutine to tell you the correct values for totBonds and totAngles
+# so you can put them in the data file
+sub printTotals {
+    print "\nChange totBonds in the data file to: $totBonds\n";
+    print "Change totAngles in the data file to: $totAngles\n\n";
+}

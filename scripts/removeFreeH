@@ -1,0 +1,537 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: removeFreeH
+# PURPOSE: This program removes atoms of a particular user-given atom
+#       type from a LAMMPS dump timestep and adjusts bond and angle
+#       dumps appropriately.
+# UPDATED: Aug. 12, 2013
+# USAGE: All distances are in angstroms.
+#       Command line options:
+#           [-h] :: print help information
+#           -dump dumpfile :: read from coordinate dumpfile
+#           -bond bondfile :: read from bond dumpfile
+#           -angle anglefile :: read from angle dumpfile
+#           EITHER {
+#               -f :: integer frame number (-1 = last frame)
+#           } OR {
+#               -t :: timestep
+#           }
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+
+use strict;
+use warnings;
+use diagnostics;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+my $coordout = "coord.out";
+my $bondout = "bond.out";
+my $angleout = "angle.out";
+
+my @removeAtomType = qw(0 6 7 12);
+
+# Command line options
+my $help;
+
+# File names
+my $dumpfile;
+my $bondfile;
+my $anglefile;
+
+my @values;
+
+my $frame;
+my $timestep;
+my @timesteps;
+my $totFrames = 0;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+my $totAngles = 0;
+
+my $totAtomsNew; #number after atoms have been removed
+my $totBondsNew; #number after atoms have been removed
+my $totAnglesNew; #number after atoms have been removed
+
+my @atomTypes;
+my @bondTypes;
+my @angleTypes;
+my @atomCoords;
+my @bonds;
+my @angles;
+
+my @newID;
+my @newBondID;
+my @newAngleID;
+
+#################################################
+# ********************************************* #
+#################################################
+# BEGIN PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+# Read command line arguments
+&readCommandLine;
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Open files for writing
+if (! open COORD, '>', $coordout) {
+    print "Could not open file $coordout for writing.\n";
+    die "ABORTING.\n";
+}
+if (! open BOND, '>', $bondout) {
+    print "Could not open file $bondout for writing.\n";
+    die "ABORTING.\n";
+}
+if (! open ANGLE, '>', $angleout) {
+    print "Could not open file $angleout for writing.\n";
+    die "ABORTING.\n";
+}
+
+# Read the system
+if ($dumpfile) {
+    if ($bondfile) {
+        if (!$frame && !$timestep) {
+            print "To read from dump file, must specify either frame " .
+                  "or timestep.\n";
+            die "ABORTING.\n";
+        }
+
+        # Open the files for reading
+        if (! open DUMPFILE, '<', $dumpfile) {
+            print "Could not open file $dumpfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if (! open BONDFILE, '<', $bondfile) {
+            print "Could not open file $bondfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if ($anglefile) {
+            if (! open ANGLEFILE, '<', $anglefile) {
+                print "Could not open file $anglefile for reading.\n";
+                die "ABORTING.\n";
+            }
+        }
+
+        # Read
+        &readDumpFiles;
+
+        # Close the files
+        close DUMPFILE;
+        close BONDFILE;
+    } else {
+        print "No bond dump file specified with coord dump file.\n";
+        die "ABORTING.\n";
+    }
+} else {
+    print "No dump file specified.\n";
+    die "ABORTING.\n";
+}
+
+# Print the new atoms and bonds
+&printSummary;
+
+# Close files for writing
+close COORD;
+close BOND;
+close ANGLE;
+
+#################################################
+# ********************************************* #
+#################################################
+# END PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to read command line options
+sub readCommandLine {
+    my $count = 0;
+
+    while ($count < scalar(@ARGV)) {
+        if (($ARGV[$count] eq "-h") || ($ARGV[$count] eq "-help")) {
+            $help = 1;
+        } elsif ($ARGV[$count] eq "-dump") {
+            $dumpfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-bond") {
+            $bondfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-angle") {
+            $anglefile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-f") {
+            $frame = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-t") {
+            $timestep = $ARGV[++$count];
+        } else {
+            print "Unknown command line parameter $ARGV[$count].\n";
+            die "ABORTING.\n";
+        }
+
+        if ($count > scalar(@ARGV)) {
+            print "Command line overrun.\n";
+            print "Check command line parameters for missing options.\n";
+            die "ABORTING.\n";
+        } else {
+            $count++;
+        }
+    }
+}
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: removeFreeH
+# PURPOSE: This program removes atoms of a particular user-given atom
+#       type from a LAMMPS dump timestep and adjusts bond and angle
+#       dumps appropriately.
+# UPDATED: Aug. 12, 2013
+# USAGE: All distances are in angstroms.
+#       Command line options:
+#           [-h] :: print help information
+#           -dump dumpfile :: read from coordinate dumpfile
+#           -bond bondfile :: read from bond dumpfile
+#           -angle anglefile :: read from angle dumpfile
+#           EITHER {
+#               -f :: integer frame number (-1 = last frame)
+#           } OR {
+#               -t :: timestep
+#           }
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to read a timestep from a dump file
+sub readDumpFiles {
+    # READ DUMP FILE
+
+    # Find the total number of frames and match them with their timestep
+    # numbers in @timesteps (the frame number is the index and the timestep
+    # number is the value)
+    my $sawTimestep = 0;
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /TIMESTEP/) {
+            $totFrames++;
+            $sawTimestep = 1;
+        } elsif ($sawTimestep == 1) {
+            chomp($line);
+            $timesteps[$totFrames] = $line;
+            $sawTimestep = 0;
+        }
+    }
+
+    # Check the requested timestep or frame number and put either in terms
+    #of both the frame number and the timestep (i.e. set both $frame and
+    #$timestep to the correct values
+    if ($frame) {
+        if (($frame > $totFrames) || ($frame < 0 - $totFrames)) {
+            print "Frame $frame out of range.\n";
+            die "ABORTING.\n";
+        }
+
+        #If a negative frame number is given
+        if ($frame =~ /\A-/) {
+            $frame = $totFrames + ($frame + 1);
+            $timestep = $timesteps[$frame];
+        }
+
+        #If a positive fram number is given
+        $timestep = $timesteps[$frame];
+
+    } elsif ($timestep) {
+        my $found = 0;
+        foreach my $step (1..$totFrames) {
+            if ($timesteps[$step] == $timestep) {
+                $frame = $step;
+                $found = 1;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep not found\n";
+            die "ABORTING.\n";
+        }
+    } else {
+        print "Must specify either a timestep or a frame number to read " .
+              "the dumpfile.\n";
+        die "ABORTING.\n";
+    }
+
+    # Go back to the beginning of the dump file
+    seek(DUMPFILE,0,0);
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    while (my $line = <DUMPFILE>) {
+        if ($line =~ /\A$timestep\Z/) { last; }
+    }
+
+    print COORD "ITEM: TIMESTEP\n";
+    print COORD "$timestep\n";
+
+    # Move the cursor down to the number of atoms section for that
+    # timestep
+    while (my $line = <DUMPFILE>) {
+        print COORD $line;
+        if ($line =~ /NUMBER OF ATOMS/) { last; }
+    }
+
+    # The next line tells the number of atoms
+    $totAtoms = <DUMPFILE>;
+    chomp($totAtoms);
+    print COORD "$totAtoms <CHANGE AS NEEDED>\n";
+    $totAtomsNew = $totAtoms;
+
+    # Initialize newID array
+    foreach my $atom (1..$totAtoms) {
+        $newID[$atom] = $atom;
+    }
+
+    # Move the cursor down to the start of the atom coords section for that
+    # timestep
+    while (my $line = <DUMPFILE>) {
+        print COORD $line;
+        if ($line =~ /\AITEM: ATOMS/) { last; }
+    }
+
+    # Read to the end of the timestep
+    while (my $line = <DUMPFILE>) {
+        chomp($line);
+        if ($line =~ /TIMESTEP/) { last; } #End loop at beginning of next frame
+
+        @values = split(/\s+/, $line);
+
+        my $atomID = $values[0];
+        my $atomtype = $values[1];
+
+        # Now we determine if the current $atomtype matches any of the atom
+        #   atom types that have been requested to be removed.
+        my $found = 0;
+        foreach my $tempAtomType (1..$#removeAtomType)
+        {
+           if ($atomtype == $removeAtomType[$tempAtomType])
+              {$found = 1; last;}
+        }
+
+        if ($found) {
+            $newID[$atomID] = 0;
+            $totAtomsNew--;
+            foreach my $atom (($atomID+1)..$totAtoms) {
+                if ($newID[$atom]) { $newID[$atom]--; }
+            }
+        } else {
+            $atomTypes[$atomID] = $atomtype;
+            $atomCoords[$atomID][0] = $values[2];
+            $atomCoords[$atomID][1] = $values[3];
+            $atomCoords[$atomID][2] = $values[4];
+        }
+    }
+
+    # Close the dump file
+    close DUMPFILE;
+
+    # Print out the rest of the timestep, removing removeAtomType atoms
+    foreach my $atom (1..$totAtoms) {
+        if (! $newID[$atom]) { next; }
+        print COORD "$newID[$atom] $atomTypes[$atom] " .
+            "$atomCoords[$atom][0] " .
+            "$atomCoords[$atom][1] " .
+            "$atomCoords[$atom][2]\n";
+    }
+
+    # READ BONDS DUMP FILE
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    {
+        my $found = 0;
+        while (my $line = <BONDFILE>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $bondfile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    print BOND "ITEM: TIMESTEP\n";
+    print BOND "$timestep\n";
+
+    # Move the cursor down to the number of entries section for that
+    # timestep
+    while (my $line = <BONDFILE>) {
+        print BOND $line;
+        if ($line =~ /NUMBER OF ENTRIES/) { last; }
+    }
+
+    # The next line tells the number of bonds
+    $totBonds = <BONDFILE>;
+    chomp($totBonds);
+    print BOND "$totBonds <CHANGE AS NEEDED>\n";
+    $totBondsNew = $totBonds;
+
+    # Initialize newBondID array
+    foreach my $bond (1..$totBonds) {
+        $newBondID[$bond] = $bond;
+    }
+
+    # Move to the bonds section of that timestep or frame
+    while (my $line = <BONDFILE>) {
+        print BOND $line;
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame
+    while (my $line = <BONDFILE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+        chomp($line);
+
+        @values = split(/\s+/, $line);
+
+        my $bondID = $values[0];
+        $bondTypes[$bondID] = $values[1];
+
+        $bonds[$bondID] = [$values[2], $values[3]];
+
+        if ((! $newID[$values[2]]) || (! $newID[$values[3]])) {
+            print "Removing bond $bondID; bondtype($values[1]):\n";
+            print "\tatom 1: oldID($values[2]); newID($newID[$values[2]])\n";
+            print "\tatom 2: oldID($values[3]); newID($newID[$values[3]])\n";
+            $newBondID[$bondID] = 0;
+            $totBondsNew--;
+            foreach my $bond (($bondID+1)..$totBonds) {
+                if ($newBondID[$bond]) { $newBondID[$bond]--; }
+            }
+        }
+    }
+
+    # Close the bonds dump file
+    close BONDFILE;
+
+    # Print out the rest of the timestep, removing bonds with
+    # removeAtomType atoms and renaming IDs as needed
+    print "totAtomsNew = $totAtomsNew; totBondsNew = $totBondsNew\n";
+    foreach my $bond (1..$totBonds) {
+        if (! $newBondID[$bond]) { next; }
+        print BOND "$newBondID[$bond] $bondTypes[$bond] " .
+            "$newID[$bonds[$bond][0]] $newID[$bonds[$bond][1]]\n";
+    }
+
+    # READ ANGLES DUMP FILE
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    {
+        my $found = 0;
+        while (my $line = <ANGLEFILE>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $anglefile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    print ANGLE "ITEM: TIMESTEP\n";
+    print ANGLE "$timestep\n";
+
+
+    # Move the cursor down to the number of entries section for that
+    # timestep
+    while (my $line = <ANGLEFILE>) {
+        print ANGLE $line;
+        if ($line =~ /NUMBER OF ENTRIES/) { last; }
+    }
+
+    # The next line tells the number of angle
+    $totAngles = <ANGLEFILE>;
+    print ANGLE $totAngles;
+    chomp($totAngles);
+    $totAnglesNew = $totAngles;
+
+    # Initialize newAngleID array
+    foreach my $angle (1..$totAngles) {
+        $newAngleID[$angle] = $angle;
+    }
+
+    # Move to the angles section of that timestep or frame
+    while (my $line = <ANGLEFILE>) {
+        print ANGLE $line;
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame
+    while (my $line = <ANGLEFILE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+        chomp($line);
+
+        @values = split(/\s+/, $line);
+
+        my $angleID = $values[0];
+        $angleTypes[$angleID] = $values[1];
+
+        $angles[$angleID] = [$values[2], $values[3], $values[4]];
+
+        if ((! $newID[$values[2]]) || (! $newID[$values[3]]) ||
+            (! $newID[$values[4]])) {
+            $newAngleID[$angleID] = 0;
+            $totAnglesNew--;
+            foreach my $angle (($angleID+1)..$totAngles) {
+                if($newAngleID[$angle]) { $newAngleID[$angle]--; }
+            }
+        }
+    }
+
+    # Close the bonds dump file
+    close ANGLEFILE;
+
+    # Print out the rest of the timestep, removing angles with
+    # removeAtomType atoms and renaming IDs as needed
+    foreach my $angle (1..$totAngles) {
+        if (! $newAngleID[$angle]) { next; }
+        print ANGLE "$newAngleID[$angle] $angleTypes[$angle] " .
+            "$newID[$angles[$angle][0]] $newID[$angles[$angle][1]] " .
+            "$newID[$angles[$angle][2]]\n";
+    }
+}
+
+# A subroutine to print a summary
+#print file names, num new bonds added (and per type, and to which atoms,etc.)
+sub printSummary {
+    print "\nChange NUMBER OF ATOMS in the coord file to: $totAtomsNew\n\n";
+
+    my $rem = $totAtoms - $totAtomsNew;
+    print "totAtoms originally: $totAtoms\n";
+    print "totAtoms now: $totAtomsNew\n";
+    print "removed $rem atoms of type @removeAtomType\n\n";
+
+    $rem = $totBonds - $totBondsNew;
+    print "totBonds originally: $totBonds\n";
+    print "totBonds now: $totBondsNew\n";
+    print "removed $rem bonds containing atoms of type @removeAtomType\n\n";
+
+    $rem = $totAngles - $totAnglesNew;
+    print "totAngles originally: $totAngles\n";
+    print "totAngles now: $totAnglesNew\n";
+    print "removed $rem angles containing atoms of type @removeAtomType\n";
+}

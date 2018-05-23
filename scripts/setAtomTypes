@@ -1,0 +1,278 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: setAtomTypes
+# PURPOSE: sets the elements column in a PDB to element_atomtype#
+# UPDATED:
+# USAGE: use stdin and stdout
+#   Reads a pdb with bond info and sorts the atoms into types (adds "_#",
+#   where "#" is a type number, to their element name; e.g. B_2, C_13).
+#
+#   Assume B10C2H12 (protonated) and linkers either CH4 or CH3CH3
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+use strict;
+use warnings;
+use diagnostics;
+use Getopt::Long;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# Command line information
+my $help;
+
+my @values;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+
+my @elements;
+my @coords;
+
+# Bonds section
+my $bondID;
+my @bonds;
+my @bondTypes;
+
+my $numLines = 0;
+my @lines;
+
+my @types;
+my @thingy;
+
+#################################################
+# **********************************************
+#################################################
+# **********************************************
+#
+# THE MAIN PART OF THE PROGRAM
+#
+# **********************************************
+#################################################
+# **********************************************
+#################################################
+
+#################################################
+# READ INPUT FILE
+#################################################
+
+while (my $line = <STDIN>) {
+    chomp($line);
+    $numLines++;
+    if (! (($line =~ /\AATOM/) || ($line =~ /\ACONECT/)) ) {
+        $lines[$numLines] = $line;
+        next;
+    } elsif ($line =~ /\AATOM/) {
+        @values = split(/\s+/, $line);
+        my $atom = $values[1];
+        $totAtoms = $atom;
+        $elements[$atom] = $values[2];
+        $coords[$atom][0] = $values[6];
+        $coords[$atom][1] = $values[7];
+        $coords[$atom][2] = $values[8];
+        $thingy[$atom] = $values[11];
+    } elsif ($line =~ /\ACONECT/) {
+        $lines[$numLines] = $line;
+        #Read bonds section
+        #This section assumes the bonds section has the form: "CONECT"
+        #followed by an atom number, which is in turn followed by numbers
+        #for all the atoms bonded to it.
+        @values = split(/\s+/, $line);
+        shift(@values); #Throw away "CONECT"
+        my $bonder = shift(@values);
+        foreach my $bondee (@values) {
+            if ($bondee > $bonder) {
+                #This assumes you already recorded the bond in the line
+                #listing the bonded atoms for $bonder if $bonder is less
+                #than $bondee. It skips those bonds to avoid doubling up.
+                $totBonds++;
+                $bonds[$totBonds] = [ $bonder, $bondee ];
+            }
+        }
+    }
+}
+
+# TYPES KEY:
+# 1 = B (w/ H attached)
+# 2 = bondable B (no H attached)
+# 3 = H bonded to icos B (breakable)
+# 4 = H bonded to icos C (nonbreaking)
+# 5 = H bonded to extraicos C (breakable)
+# 6 = H bonded to H
+# 7 = H alone
+# 8 = icos C
+# 9 = linker C with no open bonding
+# 10 = linker C with 1 open bonding
+# 11 = linker C with 2 open bonding
+
+foreach my $atom (1..$totAtoms) {
+    if ($elements[$atom] eq 'B') {
+        $types[$atom] = &findBType($atom);
+    } elsif ($elements[$atom] eq 'C') {
+        $types[$atom] = &findCType($atom);
+    } elsif ($elements[$atom] eq 'H') {
+        $types[$atom] = &findHType($atom);
+    } else {
+        print "Only set up to handle B, C, and H so far!\n";
+        die "Unknown element: $elements[$atom]\n";
+    }
+}
+
+my $numAtom = 0;
+foreach my $line (1..$numLines) {
+    if ($lines[$line]) {
+        print "$lines[$line]\n";
+        next;
+    }
+    $numAtom++;
+    my $atom = $numAtom;
+    print "ATOM ";
+    printf "%7s", "$atom ";
+    printf "%5s", "$elements[$atom]_$types[$atom] ";
+    print "MOL H   0 ";
+    printf "%12s", "$coords[$atom][0] ";
+    printf "%8s", "$coords[$atom][1] ";
+    printf "%8s", "$coords[$atom][2] ";
+    print " 1.00  0.00           $thingy[$atom]\n";
+}
+
+#################################################
+# **********************************************
+#################################################
+# **********************************************
+#
+# END PROGRAM EXECUTION
+#
+# **********************************************
+#################################################
+# **********************************************
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to find the atom type number of a B atom
+# Pass the B atom's ID as an argument
+# Returns the atom's type number
+sub findBType {
+    my $atom = shift(@_);
+
+    if ($elements[$atom] ne 'B') {
+        die "Atom $atom sent to &findBType is not B\n";
+    }
+
+    my $type = 0;
+    foreach my $bond (1..$totBonds) {
+        if ($bonds[$bond][0] == $atom) {
+            if ($elements[$bonds[$bond][1]] eq 'H') {
+                $type = 1;
+                last;
+            }
+        } elsif ($bonds[$bond][1] == $atom) {
+            if ($elements[$bonds[$bond][0]] eq 'H') {
+                $type = 1;
+                last;
+            }
+        }
+    }
+    if ($type) {
+        return(1);
+    } else {
+        return(2);
+    }
+}
+
+# A subroutine to find the atom type number of a C atom
+# Pass the C atom's ID as an argument
+sub findCType {
+    my $atom = shift(@_);
+
+    if ($elements[$atom] ne 'C') {
+        die "Atom $atom sent to &findCType is not C\n";
+    }
+
+    my $bBonded = 0;
+    my $numBonded = 0;
+    foreach my $bond (1..$totBonds) {
+        if ($bonds[$bond][0] == $atom) {
+            if ($elements[$bonds[$bond][1]] eq 'B') {
+                $bBonded++;
+                $numBonded++;
+            } else {
+                $numBonded++;
+            }
+        } elsif ($bonds[$bond][1] == $atom) {
+            if ($elements[$bonds[$bond][0]] eq 'B') {
+                $bBonded++;
+                $numBonded++;
+            } else {
+                $numBonded++;
+            }
+        }
+        #More than 2 B bonded means icosahedral C
+        if ($bBonded > 2) {
+            return(8);
+        }
+    }
+
+    if ($numBonded == 2) {
+        return(11);
+    } elsif ($numBonded == 3) {
+        return(10);
+    } elsif ($numBonded == 4) {
+        return(9);
+    } else {
+        die "Unknown bond configuration: $!\n";
+    }
+}
+
+# A subroutine to find the atom type number of a H atom
+# Pass the H atom's ID as an argument
+sub findHType {
+    my $atom = shift(@_);
+
+    if ($elements[$atom] ne 'H') {
+        die "Atom $atom sent to &findHType is not H\n";
+    }
+
+    my $bondFound = 0;
+
+    foreach my $bond (1..$totBonds) {
+        if ($bonds[$bond][0] == $atom || $bonds[$bond][1] == $atom) {
+            $bondFound = 1;
+
+            my $bondedAtom;
+            if ($bonds[$bond][0] == $atom) {
+                $bondedAtom = $bonds[$bond][1];
+            } else {
+                $bondedAtom = $bonds[$bond][0];
+            }
+
+            #H bonded to icos B (breakable)
+            if ($elements[$bondedAtom] eq 'B') {
+                return(3);
+            #H bonded to H
+            } elsif ($elements[$bondedAtom] eq 'H') {
+                return(6);
+            } elsif ($elements[$bondedAtom] eq 'C') {
+                my $Ctype = &findCType($bondedAtom);
+                #H bonded to icos C (nonbreaking) is nonbreaking
+                if ($Ctype == 8) {
+                    return(4);
+                #H bonded to extra C is breakable
+                } else {
+                    return(5);
+                }
+            }
+        }
+    }
+    #H not bonded to anything
+    if (!$bondFound) {
+        return(7);
+    }
+}

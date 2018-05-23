@@ -1,0 +1,24 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+my $hMass;
+my $bMass;
+my $cMass;
+my $totalMass;
+my $density;
+my $hPercent;
+my $latticeLength;
+
+$density = 1.4; # grams / cc
+$hPercent = 0.38; # hAtoms / totalAtoms
+
+$hMass = 699 *  1.0079;
+$bMass = 940 * 10.81;
+$cMass = 200 * 12.011;
+$totalMass = ($hMass + $bMass + $cMass) * 1.6605*10**-24;
+print STDOUT "Total Mass = $totalMass\n";
+
+$latticeLength = (($totalMass / $density)**(1.0/3.0)) * 1.0*10**8;
+print STDOUT "Lattice Length = $latticeLength Angstroms\n";

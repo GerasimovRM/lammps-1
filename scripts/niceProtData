@@ -1,0 +1,595 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: niceProtData
+# PURPOSE: This program nicens up the LAMMPS data file written by
+#       the protonate program. Currently, it:
+#           1. Removes angles including atoms of nH type (added by the
+#               protonate program)
+#           2. Sets bond type numbers for bonds involving nH type atoms
+#           3. Sets an atom type number for nH atoms
+#           4. Corrects the molecule numbers
+#       A file called data.niceProtData is written.
+# UPDATED: Jan. 15, 2014
+# USAGE:
+#       When the program is run, it will search for a file called
+#       bondTypes. If no file is found, it will compile a list of
+#       all the bond types seen in the data file (with the form
+#       type1-type2) and write a bondTypes file in which the user
+#       must fill in the bond type numbers for each listed case.
+#       Command line options:
+#           [-h] :: print help information
+#           -data <datafile> :: read from the skeleton data file
+#               datafile, printed by the protonation program
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+
+use strict;
+use warnings;
+use diagnostics;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# Change as needed
+my $outfile = "data.niceProtData";
+
+# Command line options
+my $help;
+my $datafile;
+
+my @values;
+
+my $totAtoms = 0;
+my $totBonds = 0;
+my $totAngles = 0;
+
+my $totAnglesNew; #number after angles have been removed
+
+my @atomTypes;
+my @bondTypes;
+my @angleTypes;
+my @molecules;
+my @charge;
+my @atomCoords;
+
+my @bonds;
+my @angles;
+
+my @atomComments;
+my @bondComments;
+my @angleComments;
+
+my @newAngleID;
+
+my @bondConfigs;
+
+my @b_atom; # b_atom[i][j] = id of jth atom bonded to atom i
+my $totMols = 0;
+
+#################################################
+# ATOM TYPES
+#################################################
+
+# Assumed atom types
+
+my @elements;
+
+$elements[1] = "B"; # 1 = bonded B (with H or extra C or B)
+$elements[2] = "B"; # 2 = bondable B
+$elements[3] = "H"; # 3 = H bonded to B
+$elements[4] = "H"; # 4 = H bonded to icos C
+$elements[5] = "H"; # 5 = H bonded to extra C
+$elements[6] = "H"; # 6 = H bonded to H
+$elements[7] = "H"; # 7 = free H
+$elements[8] = "C"; # 8 = icos C
+$elements[9] = "C"; # 9 = linker C with no openings
+$elements[10] = "C"; # 10 = linker C with 1 opening
+$elements[11] = "C"; # 11 = linker C with 2 openings
+$elements[12] = "C"; # 12 = linker C with 3 openings
+$elements[13] = "H"; # 13 = temporary H-H-C or H-H-B bond
+
+#################################################
+# ********************************************* #
+#################################################
+# BEGIN PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+# Read command line arguments
+&readCommandLine;
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Open the file for writing
+if (! open OUT, '>', $outfile) {
+    print "Could not open file $outfile for writing.\n";
+    die "ABORTING.\n";
+}
+
+# Read the system
+if ($datafile) {
+    # Open the data file for reading
+    if (! open DATA, '<', $datafile) {
+        print "Could not open file $datafile for reading.\n";
+        die "ABORTING.\n";
+    }
+    
+    # Read data file
+    &readInput;
+    
+    # Close the data file
+    close DATA;
+} else {
+    print "No protonation data file specified.\n";
+    die "ABORTING.\n";
+}
+
+# Reset atom types
+&resetAtomTypes;
+
+# Read the bond types file (if it exists -- print it if it doesn't)
+unless (open BOND, '<', 'bondTypes') {
+    &writeBondTypes;
+}
+
+# Read the bondTypes file
+&readBondTypes;
+
+# Reset bond types
+&resetBondTypes;
+
+# Reset comments after type changes
+&resetComments;
+
+# Remove angles
+&removeAngles;
+
+# Correct molecule numbers
+&setMolecules;
+
+# Print the rest of the new data file
+&printOutput;
+
+# Print the new atoms and bonds
+&printSummary;
+
+# Close file for writing
+close OUT;
+
+#################################################
+# ********************************************* #
+#################################################
+# END PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to read command line options
+sub readCommandLine {
+    my $count = 0;
+
+    while ($count < scalar(@ARGV)) {
+        if (($ARGV[$count] eq "-h") || ($ARGV[$count] eq "-help")) {
+            $help = 1;
+        } elsif ($ARGV[$count] eq "-data") {
+            $datafile = $ARGV[++$count];
+        } else {
+            print "Unknown command line parameter $ARGV[$count].\n";
+            die "ABORTING.\n";
+        }
+
+        if ($count > scalar(@ARGV)) {
+            print "Command line overrun.\n";
+            print "Check command line parameters for missing options.\n";
+            die "ABORTING.\n";
+        } else {
+            $count++;
+        }
+    }
+}
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: niceProtData
+# PURPOSE: This program nicens up the LAMMPS data file written by
+#       the protonate program. Currently, it:
+#           1. Removes angles including atoms of nH type (added by the
+#               protonate program)
+#           2. Sets bond type numbers for bonds involving nH type atoms
+#           3. Sets an atom type number for nH atoms
+#       A file called data.niceProtData is written.
+# UPDATED: Jan. 13, 2014
+# USAGE:
+#       When the program is run, it will search for a file called
+#       bondTypes. If no file is found, it will compile a list of
+#       all the bond types seen in the data file (with the form
+#       type1-type2) and write a bondTypes file in which the user
+#       must fill in the bond type numbers for each listed case.
+#       Command line options:
+#           [-h] :: print help information
+#           -data <datafile> :: read from the skeleton data file
+#               datafile, printed by the protonation program
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to read the data file
+sub readInput {
+    # READ AND PRINT THE HEADER
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\AAtoms\Z/) { last; }
+        print OUT $line;
+    }
+
+    # READ THE ATOMS SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totAtoms++;
+        @values = split(/\s+/, $line);
+
+        $molecules[$totAtoms] = $values[1];
+        $atomTypes[$totAtoms] = $values[2];
+        $charge[$totAtoms] = $values[3];
+        $atomCoords[$totAtoms][0] = $values[4];
+        $atomCoords[$totAtoms][1] = $values[5];
+        $atomCoords[$totAtoms][2] = $values[6];
+        if ($#values > 6) {
+            my $i = 7;
+            $atomComments[$totAtoms] = "$values[$i++]";
+            while ($i <= $#values) {
+                $atomComments[$totAtoms] .= " $values[$i++]";
+            }
+        }
+    }
+
+    # READ THE BONDS SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totBonds++;
+        @values = split(/\s+/, $line);
+
+        $bondTypes[$totBonds] = $values[1];
+        $bonds[$totBonds] = [$values[2], $values[3]];
+        if ($#values > 3) {
+            my $i = 4;
+            $bondComments[$totBonds] = "$values[$i++]";
+            while ($i <= $#values) {
+                $bondComments[$totBonds] .= " $values[$i++]";
+            }
+        }
+    }
+
+    # READ THE ANGLES SECTION
+
+    # Move down to the body of the section
+    <DATA>;
+    <DATA>;
+
+    while (my $line = <DATA>) {
+        if ($line =~ /\A\Z/) { last; }
+        chomp($line);
+
+        $totAngles++;
+        @values = split(/\s+/, $line);
+
+        $angleTypes[$totAngles] = $values[1];
+        $angles[$totAngles] = [$values[2], $values[3], $values[4]];
+        if ($#values > 4) {
+            my $i = 5;
+            $angleComments[$totAngles] = "$values[$i++]";
+            while ($i <= $#values) {
+                $angleComments[$totAngles] .= " $values[$i++]";
+            }
+        }
+    }
+}
+
+# A subroutine to reset nH atom types
+sub resetAtomTypes {
+    foreach my $atom (1..$totAtoms) {
+        unless ($atomTypes[$atom] == 0) { next; }
+        foreach my $bond (1..$totBonds) {
+            if ($bonds[$bond][0] == $atom) {
+                my $bondedAtom = $bonds[$bond][1];
+                if ($atomTypes[$bondedAtom] == 2) {
+                    $atomTypes[$atom] = 3;
+                    $atomTypes[$bondedAtom] = 1;
+                    $atomComments[$atom] = "#H_3";
+                    $atomComments[$bondedAtom] = "#B_1";
+                    last;
+                } elsif ( ($atomTypes[$bondedAtom] == 10) ||
+                          ($atomTypes[$bondedAtom] == 11) ||
+                          ($atomTypes[$bondedAtom] == 12)
+                        ) {
+                    $atomTypes[$atom] = 5;
+                    $atomTypes[$bondedAtom]--;
+                    $atomComments[$atom] = "#H_5";
+                    $atomComments[$bondedAtom] = "#C_$atomTypes[$bondedAtom]";
+                    last;
+                } else {
+                    die "Unknown bond configuration: bond $bond\n";
+                }
+            } elsif ($bonds[$bond][1] == $atom) {
+                my $bondedAtom = $bonds[$bond][0];
+                if ($atomTypes[$bondedAtom] == 2) {
+                    $atomTypes[$atom] = 3;
+                    $atomTypes[$bondedAtom] = 1;
+                    $atomComments[$atom] = "#H_3";
+                    $atomComments[$bondedAtom] = "#B_1";
+                    last;
+                } elsif ( ($atomTypes[$bondedAtom] == 10) ||
+                          ($atomTypes[$bondedAtom] == 11) ||
+                          ($atomTypes[$bondedAtom] == 12)
+                        ) {
+                    $atomTypes[$atom] = 5;
+                    $atomTypes[$bondedAtom]--;
+                    $atomComments[$atom] = "#H_5";
+                    $atomComments[$bondedAtom] = "#C_$atomTypes[$bondedAtom]";
+                    last;
+                } else {
+                    die "Unknown bond configuration: bond $bond\n";
+                }
+            }
+        }
+    }
+}
+
+# A subroutine to read a bondTypes file
+sub readBondTypes {
+    # Move down past the header
+    <BOND>;
+    <BOND>;
+    <BOND>;
+
+    # Read the types section
+    while (my $line = <BOND>) {
+        chomp($line);
+        @values = split(/\s+:\s+/,$line);
+        push(@bondConfigs, [$values[0], $values[1]]);
+    }
+}
+
+# A subroutine to reset the bond types of bonds involving nH atoms
+sub resetBondTypes {
+    foreach my $bond (1..$totBonds) {
+        unless ($bondTypes[$bond] == 0) { next; }
+        my $found = 0;
+        foreach my $conf (0..$#bondConfigs) {
+            if ($bondConfigs[$conf][0] eq $bondComments[$bond]) {
+                $bondTypes[$bond] = $bondConfigs[$conf][1];
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            warn "No bond type number found for bond $bond : ".
+                 "$bondComments[$bond]\n";
+        }
+    }
+}
+
+# A subroutine to write a bondTypes template file
+sub writeBondTypes {
+    # Open bondTypes file for writing
+    if (! open BOND, '>', 'bondTypes') {
+        die "Cannot open bondTypes for writing: $!";
+    } else {
+        select BOND;
+    }
+
+    print "This is the bondtypes template file. Fill in the bond type\n".
+          "numbers for each listed bond configuration after the colon.\n";
+
+    # Find configurations
+    my $found = 0;
+    foreach my $bond (1..$totBonds) {
+        unless ($bondTypes[$bond] == 0) { next; }
+        my $comment = $bondComments[$bond];
+        foreach my $config (@bondConfigs) {
+            if ($comment eq $config) { $found = 1; }
+        }
+        if ($found) {
+            $found = 0;
+        } else {
+            push(@bondConfigs, $comment);
+        }
+    }
+
+    # Print configurations
+    foreach my $config (@bondConfigs) {
+        print "\n$config :"
+    }
+
+    # Remind the user to fill out the bondTypes file
+    select STDOUT;
+    print "A bondTypes file has been created. Fill it in and try again.\n";
+
+    # Close and exit
+    close BOND;
+    exit;
+}
+
+# A subroutine to remove angles involving nH atoms
+sub removeAngles {
+    $totAnglesNew = $totAngles;
+    foreach my $angle (1..$totAngles) {
+        $newAngleID[$angle] = $angle;
+    }
+
+    # Remove angles
+    foreach my $angleID (1..$totAngles) {
+        unless ($angleTypes[$angleID] == 0) { next; }
+        $newAngleID[$angleID] = 0;
+        $totAnglesNew--;
+        foreach my $angle (($angleID+1)..$totAngles) {
+            if ($newAngleID[$angle]) { $newAngleID[$angle]--; }
+        }
+    }
+}
+
+# A subroutine to correct the molecule numbers
+sub setMolecules {
+    # PREPARE DATA STRUCTURES FOR DEPTH-FIRST SEARCHING
+
+    # Initialize
+    my @stack;
+    foreach my $bond (1..$totBonds) {
+        my $a1 = $bonds[$bond][0];
+        my $a2 = $bonds[$bond][1];
+        push(@{$b_atom[$a1]},$a2);
+        push(@{$b_atom[$a2]},$a1);
+    }
+
+    foreach my $a (1..$totAtoms) { $molecules[$a] = 0; }
+
+    # FILL MOLECULE ARRAY
+
+    # Find molecules
+    foreach my $atom (1..$totAtoms) {
+        if ($molecules[$atom]) { next; }
+        $totMols++;
+
+        push(@stack, $atom);
+
+        while (scalar(@stack)) {
+            my $i = pop(@stack);
+
+            if ($molecules[$i] != $totMols) {
+                $molecules[$i] = $totMols;
+            }
+
+            foreach my $j (@{$b_atom[$i]}) {
+                if ($molecules[$j] != $totMols) {
+                    push(@stack, $j);
+                }
+            }
+        }
+    }
+
+    # Make molecule number sequential
+    foreach my $mol (1..$totMols) {
+        my $found = 0;
+        foreach my $atom (1..$totAtoms) {
+            if ($molecules[$atom] == $mol) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            foreach my $atom (1..$totAtoms) {
+                if ($molecules[$atom] == $totMols) {
+                    $molecules[$atom] = $mol;
+                }
+            }
+            $totMols--;
+        }
+    }
+}
+
+# A subroutine to reset comments now that types have changed
+sub resetComments {
+    # Reset bond comments
+    foreach my $bond (1..$totBonds) {
+        my $type1 = $atomTypes[$bonds[$bond][0]];
+        my $type2 = $atomTypes[$bonds[$bond][1]];
+        my $elem1 = $elements[$type1];
+        my $elem2 = $elements[$type2];
+        $bondComments[$bond] = "#$elem1\_$type1-$elem2\_$type2";
+    }
+
+    # Reset angle comments
+    foreach my $angle (1..$totAngles) {
+        my $type1 = $atomTypes[$angles[$angle][0]];
+        my $type2 = $atomTypes[$angles[$angle][1]];
+        my $type3 = $atomTypes[$angles[$angle][2]];
+        my $elem1 = $elements[$type1];
+        my $elem2 = $elements[$type2];
+        my $elem3 = $elements[$type3];
+        $angleComments[$angle] = "#$elem1\_$type1-$elem2\_$type2-".
+                                 "$elem3\_$type3";
+    }
+}
+
+# A subroutine to print the rest of the new data file
+sub printOutput {
+    # Print the Atoms section
+    print OUT "Atoms\n\n";
+    foreach my $atom (1..$totAtoms) {
+        print OUT "$atom $molecules[$atom] $atomTypes[$atom] ".
+            "$charge[$atom] $atomCoords[$atom][0] $atomCoords[$atom][1] ".
+            "$atomCoords[$atom][2]";
+        if ($atomComments[$atom]) {
+            print OUT " $atomComments[$atom]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+    print OUT "\n";
+
+    # Print the Bonds section
+    print OUT "Bonds\n\n";
+    foreach my $bond (1..$totBonds) {
+        print OUT "$bond $bondTypes[$bond] $bonds[$bond][0] ".
+                  "$bonds[$bond][1]";
+        if ($bondComments[$bond]) {
+            print OUT " $bondComments[$bond]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+    print OUT "\n";
+
+    # Print the Angles section
+    print OUT "Angles\n\n";
+    foreach my $angle (1..$totAngles) {
+        if (! $newAngleID[$angle]) { next; }
+        print OUT "$newAngleID[$angle] $angleTypes[$angle] ".
+            "$angles[$angle][0] $angles[$angle][1] ".
+            "$angles[$angle][2]";
+        if ($angleComments[$angle]) {
+            print OUT " $angleComments[$angle]\n";
+        } else {
+            print OUT "\n";
+        }
+    }
+}
+
+# A subroutine to print a summary
+#print file names, num new bonds added (and per type, and to which atoms,etc.)
+sub printSummary {
+    print "\nNew NUMBER OF ATOMS: $totAtoms\n";
+    print "New NUMBER OF BONDS: $totBonds\n";
+    print "New NUMBER OF ANGLES: $totAnglesNew\n\n";
+
+    my $rem = $totAngles - $totAnglesNew;
+    print "\ntotAngles originally: $totAngles\n";
+    print "totAngles now: $totAnglesNew\n";
+    print "removed $rem angles\n";
+}

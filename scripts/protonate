@@ -1,0 +1,1618 @@
+#!/usr/bin/perl
+#################################################
+# PROGRAM: protonate
+# PURPOSE: This program protonates a-BxC:Hy bonding sites left over after a
+#       LAMMPS condensation.
+# UPDATED: Jan. 10, 2014
+# USAGE: All distances are in angstroms.
+#       Command line options:
+#           [-h] :: print help information
+#           [-v] :: verbose -- print extra info during run
+#           [-force] :: force protonation for atoms that fail the atom check
+#               (e.g. because they're too close to another atom)
+#           [-o outfile] :: output file; default is "protonate.out"
+#           [-e errfile] :: error file; default is "err.out"
+#           [-pdb pdbfile] :: PDB file; default is "protonate.pdb"
+#           [-data datafile] :: LAMMPS data file; default is "data.protonate"
+#           [-title titleName] :: default is "NULL"
+#       EITHER {
+#           -dump dumpfile :: read from coordinate dumpfile
+#           -bond bondfile :: read from bond dumpfile
+#           -angle anglefile :: read from angle dumpfile
+#           EITHER {
+#               -f :: integer frame number (-1 = last frame)
+#           } OR {
+#               -t :: timestep
+#           }
+#       } OR {
+#           -datain datainfile :: read from datainfile
+#       }
+#           [-bondtype newbondtype atom1type atom2type
+#               [-bondtype newbondtype atom1type atom2type] . . .
+#               :: bondtype for new bonds between atoms of atom1type and
+#               atom2type; you could put these, one per line, in a file
+#               called newBondTypes.in (STUB !!!)
+#################################################
+
+#################################################
+# USE MODULES
+#################################################
+
+use strict;
+use warnings;
+use diagnostics;
+
+#################################################
+# DECLARE GLOBAL VARIABLES
+#################################################
+
+# User check and set defaults as desired ########
+
+my $outfile = "protonate.out";
+my $errfile = "err.out";
+my $pdbfile = "protonate.pdb";
+my $datafile = "data.protonate";
+
+my $title = "NULL";
+
+my $newAtomType = 13;
+my $newBondType = 11;
+my $newAngleType = 12;
+
+my $checkCutoff = 5.0; #Check distance between a new atom and atoms within
+        #this distance of its proposed coordinates; just so you don't waste
+        #time calculating the distance for every atom--just those nearby
+my $atomCheckDist = 1.0; #Error if new atoms are placed within this distance
+        #of existing atoms
+#my $bondlength = 1.07; #Default for created bonds
+my $bondlength = 1.10; #Default for created bonds
+
+# End of user check section #####################
+
+# Command line options
+my $help;
+my $verbose;
+my $force;
+
+# File names
+my $dumpfile;
+my $bondfile;
+my $anglefile;
+my $datainfile;
+
+my @values;
+
+my $date;
+
+my $frame;
+my $timestep;
+my @timesteps;
+my $totFrames = 0;
+
+my $numBondTypes = 0;
+my @newBondType; #Holds command line-specified new bond types:
+        #newBondType[$newbtypeID]=[$atomtype1,$atomtype2], where $newbtypeID
+        #is a consecutive series of integers from 1 to $numBondTypes
+my @newBondTypeMap; #Maps newbtypeID (0,1,2...) to user-defined bondtype
+        #numbers (e.g. btypeID might be 1,2,3, but bondtypes could be 14,5,9
+
+# Box boundaries
+my ($xlo, $xhi);
+my ($ylo, $yhi);
+my ($zlo, $zhi);
+
+my @range;
+
+my $totAtoms = 0;
+my $totAtomsOriginal; #Does not change during protonation
+my @atomTypes;
+my @atomCoords;
+my @elements; #User must define; search ATOM TYPE
+
+my $totBonds = 0;
+my $totBondsOriginal; #Does not change during protonation
+my @bonds;
+my @bondTypes;
+my @bondTypeLengths; #User must define; search BOND TYPE
+
+my $totAngles = 0;
+my $totAnglesOriginal; #Does not change during protonation
+my @angles;
+my @angleTypes;
+
+my @protonableB;
+my @protonableC;
+my @twiceProtonableC;
+my $totProtonableB = 0;
+my $totProtonableC = 0;
+my $totTwiceProtonableC = 0;
+
+my $totNewAtoms;
+my $totNewBonds;
+my @newAtoms;
+my @newBonds;
+my @newBondTypes;
+
+#################################################
+# DEFINE ATOM TYPES
+#################################################
+
+# Edit this section as needed
+# The indices correspond to LAMMPS atom type numbers
+
+$elements[1] = "B";
+$elements[2] = "B";
+$elements[3] = "H";
+$elements[4] = "H";
+$elements[5] = "H";
+$elements[6] = "H";
+$elements[7] = "H";
+$elements[8] = "C";
+$elements[9] = "C";
+$elements[10] = "C";
+$elements[11] = "C";
+$elements[12] = "C";
+$elements[13] = "H";
+
+#################################################
+# DEFINE BOND TYPE LENGTHS
+#################################################
+
+# Edit this section as needed. You at least need the bond type length
+# for any new bonds that will be created.
+# The indices correspond to LAMMPS atom type numbers
+
+$bondTypeLengths[1] = 1.70;
+$bondTypeLengths[2] = 1.10;
+$bondTypeLengths[3] = 1.60;
+$bondTypeLengths[4] = 1.10;
+$bondTypeLengths[5] = 1.10;
+$bondTypeLengths[6] = 1.50;
+$bondTypeLengths[7] = 1.50;
+$bondTypeLengths[8] = 1.70;
+$bondTypeLengths[9] = 1.60;
+$bondTypeLengths[10] = 0.74;
+
+#################################################
+# ********************************************* #
+#################################################
+# BEGIN PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+# Read command line arguments
+&readCommandLine;
+
+# Print help information if requested
+if ($help) { &printHelp; }
+
+# Print new bond type summary
+if ($verbose) {
+    print "#################################################\n";
+    print "# BONDTYPE PARAMETERS SUMMARY ###################\n";
+    print "#################################################\n";
+    foreach my $btypeID (1..$numBondTypes) {
+        print "New type: $newBondTypeMap[$btypeID]\n";
+        print "\tAtomType1: $newBondType[$btypeID][0]\n";
+        print "\tAtomType2: $newBondType[$btypeID][1]\n";
+    }
+    print "#################################################\n";
+    print "\n";
+}
+
+# Get the date
+$date = `date`;
+chomp($date);
+
+# Open files for writing
+if (! open OUTFILE, '>', $outfile) {
+    print "Could not open file $outfile for writing.\n";
+    die "ABORTING.\n";
+}
+if (! open ERRFILE, '>', $errfile) {
+    print "Could not open file $errfile for writing.\n";
+    die "ABORTING.\n";
+}
+if (! open PDBFILE, '>', $pdbfile) {
+    print "Could not open file $pdbfile for writing.\n";
+    die "ABORTING.\n";
+}
+if (! open DATAFILE, '>', $datafile) {
+    print "Could not open file $datafile for writing.\n";
+    die "ABORTING.\n";
+}
+
+# Read the system
+if ($dumpfile) {
+    if ($bondfile && $anglefile) {
+        if (!$frame && !$timestep) {
+            print "To read from dump file, must specify either frame " .
+                  "or timestep.\n";
+            die "ABORTING.\n";
+        }
+
+        # Open the files for reading
+        if (! open DUMP, '<', $dumpfile) {
+            print "Could not open file $dumpfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if (! open BOND, '<', $bondfile) {
+            print "Could not open file $bondfile for reading.\n";
+            die "ABORTING.\n";
+        }
+        if (! open ANGLE, '<', $anglefile) {
+            print "Could not open file $anglefile for reading.\n";
+            die "ABORTING.\n";
+        }
+
+        # Read
+        &readDumpFiles;
+
+        # Close the files
+        close DUMP;
+        close BOND;
+        close ANGLE;
+    } else {
+        print "Either bond or angle dump file not specified.\n";
+        die "ABORTING.\n";
+    }
+} elsif ($datainfile) {
+    # Open the file for reading
+    if (! open DATA, '<', $datainfile) {
+        print "Could not open file $datainfile for reading.\n";
+        die "ABORTING.\n";
+    }
+
+    # Read
+    $timestep = "NULL";
+    &readDataFile;
+
+    # Close the file
+    close DATA;
+} else {
+    print "No dump or data file specified.\n";
+    die "ABORTING.\n";
+}
+
+# Print system reading summary
+if ($verbose) {
+    print "#################################################\n";
+    print "# SYSTEM READING SUMMARY ########################\n";
+    print "#################################################\n";
+    print "Read timestep $timestep:\n";
+    print "\t$totAtoms atoms\n";
+    print "\t$totBonds bonds\n";
+    print "\t$totAngles angles\n";
+    print "#################################################\n";
+    print "\n";
+}
+
+# Print a header for the error file
+&printErrHeader;
+
+# Find atoms that need protonation
+&findProtonables;
+
+# Protonate
+&protonate;
+
+# Print the new atoms and bonds
+&printSummary;
+
+# Print a LAMMPS data file of the new system
+&printDataFile;
+
+# Print a PDB of the new system
+&printPDB;
+
+# Close files for writing
+close OUTFILE;
+close ERRFILE;
+close PDBFILE;
+close DATAFILE;
+
+#################################################
+# ********************************************* #
+#################################################
+# END PROGRAM EXECUTION #######################
+#################################################
+# ********************************************* #
+#################################################
+
+#################################################
+# DEFINE SUBROUTINES
+#################################################
+
+# A subroutine to read command line options
+sub readCommandLine {
+    my $count = 0;
+
+    while ($count < scalar(@ARGV)) {
+        if (($ARGV[$count] eq "-h") || ($ARGV[$count] eq "-help")) {
+            $help = 1;
+        } elsif ($ARGV[$count] eq "-v") {
+            $verbose = 1;
+        } elsif ($ARGV[$count] eq "-force") {
+            $force = 1;
+        } elsif ($ARGV[$count] eq "-o") {
+            $outfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-e") {
+            $errfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-pdb") {
+            $pdbfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-data") {
+            $datafile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-title") {
+            $title = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-dump") {
+            $dumpfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-bond") {
+            $bondfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-angle") {
+            $anglefile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-datain") {
+            $datainfile = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-f") {
+            $frame = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-t") {
+            $timestep = $ARGV[++$count];
+        } elsif ($ARGV[$count] eq "-bondtype") {
+            $numBondTypes++;
+            $newBondTypeMap[$numBondTypes] = $ARGV[++$count];
+            my ($atomtype1, $atomtype2);
+            $atomtype1 = $ARGV[++$count];
+            $atomtype2 = $ARGV[++$count];
+            #Reorder lowest to highest for comparison later
+            if ($atomtype1 > $atomtype2) {
+                my $temp = $atomtype1;
+                $atomtype1 = $atomtype2;
+                $atomtype2 = $temp;
+            }
+            @{$newBondType[$numBondTypes]} = ($atomtype1, $atomtype2);
+        } else {
+            print "Unknown command line parameter $ARGV[$count].\n";
+        }
+
+        if ($count > scalar(@ARGV)) {
+            print "Command line overrun.\n";
+            print "Check command line parameters for missing options.\n";
+            die "ABORTING.\n";
+        } else {
+            $count++;
+        }
+    }
+}
+
+# A subroutine to print help information
+sub printHelp {
+print <<ENDHELP;
+#################################################
+# PROGRAM: protonate
+# PURPOSE: This program protonates a-BxC:Hy bonding sites left over after a
+#       LAMMPS condensation.
+# UPDATED: Jan. 10, 2014
+# USAGE: All distances are in angstroms.
+#       Command line options:
+#           [-h] :: print help information
+#           [-v] :: verbose -- print extra info during run
+#           [-force] :: force protonation for atoms that fail the atom check
+#               (e.g. because they're too close to another atom)
+#           [-o outfile] :: output file; default is "protonate.out"
+#           [-e errfile] :: error file; default is "err.out"
+#           [-pdb pdbfile] :: PDB file; default is "protonate.pdb"
+#           [-data datafile] :: LAMMPS data file; default is "data.protonate"
+#           [-title titleName] :: default is "NULL"
+#       EITHER {
+#           -dump dumpfile :: read from coordinate dumpfile
+#           -bond bondfile :: read from bond dumpfile
+#           -angle anglefile :: read from angle dumpfile
+#           EITHER {
+#               -f :: integer frame number (-1 = last frame)
+#           } OR {
+#               -t :: timestep
+#           }
+#       } OR {
+#           -datain datainfile :: read from datainfile
+#       }
+#           [-bondtype newbondtype atom1type atom2type
+#               [-bondtype newbondtype atom1type atom2type] . . .
+#               :: bondtype for new bonds between atoms of atom1type and
+#               atom2type; you could put these, one per line, in a file
+#               called newBondTypes.in (STUB !!!)
+#################################################
+ENDHELP
+exit;
+}
+
+# A subroutine to read a timestep from a dump file
+sub readDumpFiles {
+    # READ DUMP FILE
+
+    # Find the total number of frames and match them with their timestep
+    # numbers in @timesteps (the frame number is the index and the timestep
+    # number is the value)
+    my $sawTimestep = 0;
+    while (my $line = <DUMP>) {
+        if ($line =~ /TIMESTEP/) {
+            $totFrames++;
+            $sawTimestep = 1;
+        } elsif ($sawTimestep == 1) {
+            chomp($line);
+            $timesteps[$totFrames] = $line;
+            $sawTimestep = 0;
+        }
+    }
+
+    # Check the requested timestep or frame number and put either in terms
+    #of both the frame number and the timestep (i.e. set both $frame and
+    #$timestep to the correct values
+    if ($frame) {
+        if (($frame > $totFrames) || ($frame < 0 - $totFrames)) {
+            print "Frame $frame out of range.\n";
+            die "ABORTING.\n";
+        }
+
+        #If a negative frame number is given
+        if ($frame =~ /\A-/) {
+            $frame = $totFrames + ($frame + 1);
+            $timestep = $timesteps[$frame];
+        }
+
+        #If a positive fram number is given
+        $timestep = $timesteps[$frame];
+
+    } elsif ($timestep) {
+        my $found = 0;
+        foreach my $step (1..$totFrames) {
+            if ($timesteps[$step] == $timestep) {
+                $frame = $step;
+                $found = 1;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep not found\n";
+            die "ABORTING.\n";
+        }
+    } else {
+        print "Must specify either a timestep or a frame number to read " .
+              "the dumpfile.\n";
+        die "ABORTING.\n";
+    }
+    print "found timestep $timestep\n";
+
+    # Go back to the beginning of the dump file
+    seek(DUMP,0,0);
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    while (my $line = <DUMP>) {
+        if ($line =~ /\A$timestep\Z/) { last; }
+    }
+
+    # Move the cursor down to the number of atoms section for that
+    # timestep
+    while (my $line = <DUMP>) {
+        if ($line =~ /NUMBER OF ATOMS/) { last; }
+    }
+
+    # The next line tells the number of atoms
+    $totAtoms = <DUMP>;
+    chomp($totAtoms);
+    $totAtomsOriginal = $totAtoms;
+    print "found $totAtoms atoms\n";
+
+    # Move the cursor down to the start of the box bounds section for that
+    # timestep
+    while (my $line = <DUMP>) {
+        if ($line =~ /\AITEM: BOX BOUNDS/) { last; }
+    }
+
+    # Read the box bounds
+    {
+        my $line = <DUMP>;
+        @values = split(/\s+/, $line);
+        $xlo = $values[0];
+        $xhi = $values[1];
+
+        $line = <DUMP>;
+        @values = split(/\s+/, $line);
+        $ylo = $values[0];
+        $yhi = $values[1];
+
+        $line = <DUMP>;
+        @values = split(/\s+/, $line);
+        $zlo = $values[0];
+        $zhi = $values[1];
+    }
+    print "found box bounds:\n";
+    print "$xlo\t$xhi\n";
+    print "$ylo\t$yhi\n";
+    print "$zlo\t$zhi\n";
+
+    # Move the cursor down to the start of the atom coords section for that
+    # timestep
+    while (my $line = <DUMP>) {
+        if ($line =~ /\AITEM: ATOMS/) { last; }
+    }
+
+    # Read to the end of the timestep
+    my $highestID = 0;
+    while (my $line = <DUMP>) {
+        chomp($line);
+        if ($line =~ /TIMESTEP/) { last; } #End loop at beginning of next frame
+
+        @values = split(/\s+/, $line);
+        my $atomID = $values[0];
+        if ($atomID > $highestID)
+        {
+           foreach my $atom ($highestID+1..$atomID-1)
+              {$atomTypes[$atom] = -1;}
+           $highestID = $atomID;
+        }
+        $atomTypes[$atomID] = $values[1];
+
+        $atomCoords[$atomID][0] = $values[2];
+        $atomCoords[$atomID][1] = $values[3];
+        $atomCoords[$atomID][2] = $values[4];
+    }
+    my $currentID = 1;
+    foreach my $atomID (1..$highestID)
+    {
+        if ($atomTypes[$atomID] >= 0)
+        {
+           $atomTypes[$currentID] = $atomTypes[$atomID];
+           $atomCoords[$currentID][0] = $atomCoords[$atomID][0];
+           $atomCoords[$currentID][1] = $atomCoords[$atomID][1];
+           $atomCoords[$currentID][2] = $atomCoords[$atomID][2];
+           $currentID++;
+        }
+    }
+
+
+    # Make sure the box bounds completely encompass all the atoms
+    {
+        my @atomHi;
+        my @atomLo;
+
+        # hi values
+        foreach my $axis (0..2) {
+            $atomHi[$axis] = $atomCoords[1][$axis];
+            foreach my $atom (1..$totAtoms) {
+                if ($atomCoords[$atom][$axis] > $atomHi[$axis]) {
+                    $atomHi[$axis] = $atomCoords[$atom][$axis];
+                }
+            }
+        }
+
+        # lo values
+        foreach my $axis (0..2) {
+            $atomLo[$axis] = $atomCoords[1][$axis];
+            foreach my $atom (1..$totAtoms) {
+                if ($atomCoords[$atom][$axis] < $atomLo[$axis]) {
+                    $atomLo[$axis] = $atomCoords[$atom][$axis];
+                }
+            }
+        }
+
+        # Compare with box bounds and redefine if needed
+        if ($atomHi[0] > $xhi) {
+            $xhi = $atomHi[0];
+        }
+        if ($atomHi[1] > $yhi) {
+            $yhi = $atomHi[1];
+        }
+        if ($atomHi[2] > $zhi) {
+            $zhi = $atomHi[2];
+        }
+        if ($atomLo[0] < $xlo) {
+            $xlo = $atomLo[0];
+        }
+        if ($atomLo[1] < $ylo) {
+            $ylo = $atomLo[1];
+        }
+        if ($atomLo[2] < $zlo) {
+            $zlo = $atomLo[2];
+        }
+
+        # Set range
+        @range = ($xhi - $xlo, $yhi - $ylo, $zhi - $zlo);
+    }
+
+    # READ BONDS DUMP FILE
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    {
+        my $found = 0;
+        while (my $line = <BOND>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $bondfile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    # Move to the bonds section of that timestep or frame
+    while (my $line = <BOND>) {
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame
+    while (my $line = <BOND>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+        chomp($line);
+
+        @values = split(/\s+/, $line);
+
+        $totBonds++;
+
+        # Put the bonded atom with the lower ID first in the pair array for
+        # easier comparison later
+        if ($values[2] < $values[3]) {
+            $bonds[$totBonds] = [$values[2], $values[3]];
+        } else {
+            $bonds[$totBonds] = [$values[3], $values[2]];
+        }
+        $bondTypes[$totBonds] = $values[1];
+    }
+    $totBondsOriginal = $totBonds;
+
+    # READ ANGLES DUMP FILE
+
+    # Read the requested timestep/frame
+
+    # Move the read cursor to the correct timestep in the dumpfile
+    {
+        my $found = 0;
+        while (my $line = <ANGLE>) {
+            if ($line =~ /\A$timestep\Z/) {
+                $found = 1;
+                last;
+            }
+        }
+        if (!$found) {
+            print "Timestep $timestep was not found in $anglefile.\n";
+            die "ABORTING.\n";
+        }
+    }
+
+    # Move to the angles section of that timestep or frame
+    while (my $line = <ANGLE>) {
+        if ($line =~ /\AITEM: ENTRIES/) { last; }
+    }
+
+    # Read to the end of the timestep/frame
+    while (my $line = <ANGLE>) {
+        if ($line =~ /TIMESTEP/) { last; } #End loop at end of frame
+        chomp($line);
+
+        @values = split(/\s+/, $line);
+
+        $totAngles++;
+
+        $angles[$totAngles] = [$values[2], $values[3], $values[4]];
+
+        $angleTypes[$totAngles] = $values[1];
+    }
+    $totAnglesOriginal = $totAngles;
+}
+
+# A subroutine to read a data file
+sub readDataFile {
+# STUB stub
+}
+
+# A subroutine to print a header for the error file
+sub printErrHeader {
+    print ERRFILE "#################################################\n";
+    print ERRFILE "# ERROR FILE ####################################\n";
+    print ERRFILE "#################################################\n";
+    print ERRFILE "Title: $title\n";
+    print ERRFILE "Timestep: $timestep\n";
+    print ERRFILE "Date: $date\n";
+    printf ERRFILE "Atom check distance: %.3f\n", $atomCheckDist;
+    print ERRFILE "#################################################\n";
+}
+
+# A subroutine to find atoms that need protonation
+# Fills the @protonable arrays
+sub findProtonables {
+    # Loop over all atoms
+    foreach my $atom (1..$totAtoms) {
+        my $elem = $elements[$atomTypes[$atom]];
+        if ($elem eq "H") { next; }
+        my $numBondedB = 0;
+        my $numBondedC = 0;
+        my $numBondedH = 0;
+
+        my $notProtonable = 0;
+
+        foreach my $bond (1..$totBonds) {
+            if ($atom == $bonds[$bond][0]) {
+                if ($elements[$atomTypes[$bonds[$bond][1]]] eq "B") {
+                    $numBondedB++;
+                } elsif ($elements[$atomTypes[$bonds[$bond][1]]] eq "C") {
+                    $numBondedC++;
+                } elsif ($elements[$atomTypes[$bonds[$bond][1]]] eq "H") {
+                    $numBondedH++;
+                    if ($elem eq "B") {
+                        $notProtonable = 1;
+                        last; #B already protonated
+                    }
+                }
+            } elsif ($atom == $bonds[$bond][1]) {
+                if ($elements[$atomTypes[$bonds[$bond][0]]] eq "B") {
+                    $numBondedB++;
+                } elsif ($elements[$atomTypes[$bonds[$bond][0]]] eq "C") {
+                    $numBondedC++;
+                } elsif ($elements[$atomTypes[$bonds[$bond][0]]] eq "H") {
+                    $numBondedH++;
+                    if ($elem eq "B") {
+                        $notProtonable = 1;
+                        last; #B already protonated
+                    }
+                }
+            }
+        }
+        if ($notProtonable) { next; }
+
+        # If B and not already protonated
+        if ($elem eq "B") {
+            if (($numBondedB + $numBondedC) > 5) {
+                next;
+            } else {
+                $totProtonableB++;
+                push(@protonableB, $atom);
+                next;
+            }
+        }
+
+        # If C and not icosahedral
+        if ($elem eq "C") {
+            if ($numBondedB > 2) {
+                next; #Icosahedral C not protonable
+            } elsif (($numBondedB + $numBondedC + $numBondedH) > 3) {
+                next; #Already bonded extraicosahedral C not protonable
+            } elsif (($numBondedB + $numBondedC + $numBondedH) == 3) {
+                $totProtonableC++;
+                push(@protonableC, $atom);
+            } elsif (($numBondedB + $numBondedC + $numBondedH) == 2) {
+                $totTwiceProtonableC++;
+                push(@twiceProtonableC, $atom);
+            } else {
+                my $num = $numBondedB + $numBondedC + $numBondedH;
+#                die "ERROR: Atom $atom of element $elem has $num bonds\n";
+            }
+        }
+    }
+}
+
+# A subroutine to protonate atoms that need it
+# Protonates the atoms in the @protonable arrays
+sub protonate {
+    # Protonate B
+
+    foreach my $atom (@protonableB) {
+        # Find all atoms bonded to $atom
+        my @bondedAtoms;
+        foreach my $bond (1..$totBonds) {
+            if ($atom == $bonds[$bond][0]) {
+                push(@bondedAtoms, $bonds[$bond][1]);
+            } elsif ($atom == $bonds[$bond][1]) {
+                push(@bondedAtoms, $bonds[$bond][0]);
+            }
+        }
+
+        # Find the coordinate center of the bonded atoms
+        my @coordCenter = (0, 0, 0);
+        foreach my $bondedAtom (@bondedAtoms) {
+            # Check whether the bond spans a periodic boundary for each axis
+            # The bond spans a boundary if the distance between the two atoms
+            # along some axis is greater than the range of the box along
+            # that axis minus that distance:
+            #       Span if dist[axis] > range[axis] - dist[axis]
+
+            # For bonds that span a boundary, here's how the coords of
+            # bondedAtom are applied to coordCenter:
+            # In all cases, we're concerned with where bondedAtom is in
+            # relation to atom and its other bonded atoms. So atom can be
+            # thought of as our anchor atom and for any atoms to which it is
+            # bonded that are on the other side of a periodic boundary, we
+            # must use the coords not of the bondedAtom in the same cell as
+            # atom but instead the coords of the bondedAtom directly across
+            # across the boundary from atom in a mirroring periodic cell.
+            #   To do this, we first must know whether atom or bondedAtom
+            # has higher coordinates along the axis of the traversed boundary.
+            # If atom is higher, we think of the bond as sticking through the
+            # boundary at the high end of the axis and we need to use the
+            # coordinates of bondedAtom's mirror in the cell "above" the one
+            # containing atom. If atom is lower, we think of the bond as
+            # sticking through the boundary at the low end of the axis and we
+            # need to use the coordinates of bondedAtom's mirror in the cell
+            # "below" the one containing atom.
+
+            #   In the case of atom > bondedAtom, the coordinate of the mirror
+            # bondedAtom along the axis in question is:
+            #       coordBonded = coordAtom + (range[axis] - dist[axis])
+            #       coordBonded = coordBondedOrig + range[axis]
+
+            #   In the case of atom < bondedAtom, the coordinate of the mirror
+            # bondedAtom along the axis in question is:
+            #       coordBonded = coordAtom - (range[axis] - dist[axis])
+            #       coordBonded = coordBondedOrig - range[axis]
+
+            foreach my $axis (0..2) {
+                if ($atomCoords[$atom][$axis] >
+                    $atomCoords[$bondedAtom][$axis]) {
+                    my $dist = $atomCoords[$atom][$axis] -
+                               $atomCoords[$bondedAtom][$axis];
+                    # If dist > range - dist, bond traverses boundary
+                    if ($dist > ($range[$axis] - $dist)) {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis] +
+                                $range[$axis];
+                    } else {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis];
+                    }
+                } else {
+                    my $dist = $atomCoords[$bondedAtom][$axis] -
+                               $atomCoords[$atom][$axis];
+                    # If dist > range - dist, bond traverses boundary
+                    if ($dist > ($range[$axis] - $dist)) {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis] -
+                                $range[$axis];
+                    } else {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis];
+                    }
+                }
+            }
+        }
+        $coordCenter[0] /= scalar(@bondedAtoms);
+        $coordCenter[1] /= scalar(@bondedAtoms);
+        $coordCenter[2] /= scalar(@bondedAtoms);
+
+        # Set up a vector from that center passing through $atom
+        my @vector = (0, 0, 0);
+        $vector[0] = $atomCoords[$atom][0] - $coordCenter[0];
+        $vector[1] = $atomCoords[$atom][1] - $coordCenter[1];
+        $vector[2] = $atomCoords[$atom][2] - $coordCenter[2];
+        # Vector magnitude
+        my $vecMag = sqrt(($vector[0]**2) + ($vector[1]**2) + ($vector[2]**2));
+        # Unit vector
+        my @vec = ($vector[0]/$vecMag, $vector[1]/$vecMag, $vector[2]/$vecMag);
+
+        # Place the new H along that vector
+
+        # Find the bond length for the new bond if different from default
+        if (@newBondTypes) {
+            # ADD CODE HERE TO USE USER-DEFINED BOND TYPES/LENGTHS
+            # STUB stub
+        }
+
+        my @newAtomCoords;
+        $newAtomCoords[0] = ($bondlength * $vec[0]) + $atomCoords[$atom][0];
+        $newAtomCoords[1] = ($bondlength * $vec[1]) + $atomCoords[$atom][1];
+        $newAtomCoords[2] = ($bondlength * $vec[2]) + $atomCoords[$atom][2];
+
+        # Check whether new atom coords wrap around periodic boundary
+        if ($newAtomCoords[0] > $xhi) {
+            $newAtomCoords[0] = $newAtomCoords[0] - $range[0];
+        } elsif ($newAtomCoords[0] < $xlo) {
+            $newAtomCoords[0] = $newAtomCoords[0] + $range[0];
+        }
+        if ($newAtomCoords[1] > $yhi) {
+            $newAtomCoords[1] = $newAtomCoords[1] - $range[1];
+        } elsif ($newAtomCoords[1] < $ylo) {
+            $newAtomCoords[1] = $newAtomCoords[1] + $range[1];
+        }
+        if ($newAtomCoords[2] > $zhi) {
+            $newAtomCoords[2] = $newAtomCoords[2] - $range[2];
+        } elsif ($newAtomCoords[2] < $zlo) {
+            $newAtomCoords[2] = $newAtomCoords[2] + $range[2];
+        }
+
+        my $isOkay = &checkNewAtom($atom, @newAtomCoords);
+        if (!$isOkay) { next; }
+
+        # STUB -- NEW ATOM TYPE = totAtom types + 1
+        # STUB -- NEW BOND TYPE = totbond types + 1
+        $elements[$newAtomType] = "nH";
+        # Add new H
+        $totAtoms++;
+        @{$atomCoords[$totAtoms]} = @newAtomCoords;
+        $atomTypes[$totAtoms] = $newAtomType;
+        $totBonds++;
+        @{$bonds[$totBonds]} = ($atom, $totAtoms);
+        $bondTypes[$totBonds] = $newBondType;
+
+        # STUB -- NEW ANGLE TYPE = 0 until add code
+        # Add new angles
+        foreach my $bondedAtom (@bondedAtoms) {
+            $totAngles++;
+            $angles[$totAngles] = [$bondedAtom, $atom, $totAtoms];
+            $angleTypes[$totAngles] = $newAngleType;
+        }
+    }
+
+    # Protonate C
+
+    # Once-protonable C
+    foreach my $atom (@protonableC) {
+        # Find all atoms bonded to $atom
+        my @bondedAtoms;
+        foreach my $bond (1..$totBonds) {
+            if ($atom == $bonds[$bond][0]) {
+                push(@bondedAtoms, $bonds[$bond][1]);
+            } elsif ($atom == $bonds[$bond][1]) {
+                push(@bondedAtoms, $bonds[$bond][0]);
+            }
+        }
+
+        # Find the coordinate center of the bonded atoms
+        my @coordCenter = (0, 0, 0);
+        foreach my $bondedAtom (@bondedAtoms) {
+            # Check whether the bond spans a periodic boundary for each axis
+            # The bond spans a boundary if the distance between the two atoms
+            # along some axis is greater than the range of the box along
+            # that axis minus that distance:
+            #       Span if dist[axis] > range[axis] - dist[axis]
+
+            # For bonds that span a boundary, here's how the coords of
+            # bondedAtom are applied to coordCenter:
+            # In all cases, we're concerned with where bondedAtom is in
+            # relation to atom and its other bonded atoms. So atom can be
+            # thought of as our anchor atom and for any atoms to which it is
+            # bonded that are on the other side of a periodic boundary, we
+            # must use the coords not of the bondedAtom in the same cell as
+            # atom but instead the coords of the bondedAtom directly across
+            # across the boundary from atom in a mirroring periodic cell.
+            #   To do this, we first must know whether atom or bondedAtom
+            # has higher coordinates along the axis of the traversed boundary.
+            # If atom is higher, we think of the bond as sticking through the
+            # boundary at the high end of the axis and we need to use the
+            # coordinates of bondedAtom's mirror in the cell "above" the one
+            # containing atom. If atom is lower, we think of the bond as
+            # sticking through the boundary at the low end of the axis and we
+            # need to use the coordinates of bondedAtom's mirror in the cell
+            # "below" the one containing atom.
+
+            #   In the case of atom > bondedAtom, the coordinate of the mirror
+            # bondedAtom along the axis in question is:
+            #       coordBonded = coordAtom + (range[axis] - dist[axis])
+            #       coordBonded = coordBondedOrig + range[axis]
+
+            #   In the case of atom < bondedAtom, the coordinate of the mirror
+            # bondedAtom along the axis in question is:
+            #       coordBonded = coordAtom - (range[axis] - dist[axis])
+            #       coordBonded = coordBondedOrig - range[axis]
+
+            foreach my $axis (0..2) {
+                if ($atomCoords[$atom][$axis] >
+                    $atomCoords[$bondedAtom][$axis]) {
+                    my $dist = $atomCoords[$atom][$axis] -
+                               $atomCoords[$bondedAtom][$axis];
+                    # If dist > range - dist, bond traverses boundary
+                    if ($dist > ($range[$axis] - $dist)) {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis] +
+                                $range[$axis];
+                    } else {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis];
+                    }
+                } else {
+                    my $dist = $atomCoords[$bondedAtom][$axis] -
+                               $atomCoords[$atom][$axis];
+                    # If dist > range - dist, bond traverses boundary
+                    if ($dist > ($range[$axis] - $dist)) {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis] -
+                                $range[$axis];
+                    } else {
+                        $coordCenter[$axis] +=
+                                $atomCoords[$bondedAtom][$axis];
+                    }
+                }
+            }
+        }
+        $coordCenter[0] /= scalar(@bondedAtoms);
+        $coordCenter[1] /= scalar(@bondedAtoms);
+        $coordCenter[2] /= scalar(@bondedAtoms);
+
+        # Set up a vector from that center passing through $atom
+        my @vector = (0, 0, 0);
+        $vector[0] = $atomCoords[$atom][0] - $coordCenter[0];
+        $vector[1] = $atomCoords[$atom][1] - $coordCenter[1];
+        $vector[2] = $atomCoords[$atom][2] - $coordCenter[2];
+        # Vector magnitude
+        my $vecMag = sqrt(($vector[0]**2) + ($vector[1]**2) + ($vector[2]**2));
+        # Unit vector
+        my @vec = ($vector[0]/$vecMag, $vector[1]/$vecMag, $vector[2]/$vecMag);
+
+        # Place the new H along that vector
+
+        # Find the bond length for the new bond if different from default
+        if (@newBondTypes) {
+            # ADD CODE HERE TO USE USER-DEFINED BOND TYPES/LENGTHS
+        }
+
+        my @newAtomCoords;
+        $newAtomCoords[0] = ($bondlength * $vec[0]) + $atomCoords[$atom][0];
+        $newAtomCoords[1] = ($bondlength * $vec[1]) + $atomCoords[$atom][1];
+        $newAtomCoords[2] = ($bondlength * $vec[2]) + $atomCoords[$atom][2];
+
+        # Check whether new atom coords wrap around periodic boundary
+        if ($newAtomCoords[0] > $xhi) {
+            $newAtomCoords[0] = $newAtomCoords[0] - $range[0];
+        } elsif ($newAtomCoords[0] < $xlo) {
+            $newAtomCoords[0] = $newAtomCoords[0] + $range[0];
+        }
+        if ($newAtomCoords[1] > $yhi) {
+            $newAtomCoords[1] = $newAtomCoords[1] - $range[1];
+        } elsif ($newAtomCoords[1] < $ylo) {
+            $newAtomCoords[1] = $newAtomCoords[1] + $range[1];
+        }
+        if ($newAtomCoords[2] > $zhi) {
+            $newAtomCoords[2] = $newAtomCoords[2] - $range[2];
+        } elsif ($newAtomCoords[2] < $zlo) {
+            $newAtomCoords[2] = $newAtomCoords[2] + $range[2];
+        }
+
+        my $isOkay = &checkNewAtom($atom, @newAtomCoords);
+        if (!$isOkay) { next; }
+
+        # STUB -- NEW ATOM TYPE = totAtom types + 1
+        # STUB -- NEW BOND TYPE = totbond types + 1
+        $elements[$newAtomType] = "nH";
+        # Add new H
+        $totAtoms++;
+        @{$atomCoords[$totAtoms]} = @newAtomCoords;
+        $atomTypes[$totAtoms] = $newAtomType;
+        $totBonds++;
+        @{$bonds[$totBonds]} = ($atom, $totAtoms);
+        $bondTypes[$totBonds] = $newBondType;
+
+        # STUB -- NEW ANGLE TYPE = 0 until add code
+        # Add new angles
+        foreach my $bondedAtom (@bondedAtoms) {
+            $totAngles++;
+            $angles[$totAngles] = [$bondedAtom, $atom, $totAtoms];
+            $angleTypes[$totAngles] = $newAngleType;
+        }
+    }
+
+    # Twice-protonable C
+    foreach my $atom (@twiceProtonableC) {
+        # Find all atoms bonded to $atom
+        my @bondedAtoms;
+        foreach my $bond (1..$totBonds) {
+            if ($atom == $bonds[$bond][0]) {
+                push(@bondedAtoms, $bonds[$bond][1]);
+            } elsif ($atom == $bonds[$bond][1]) {
+                push(@bondedAtoms, $bonds[$bond][0]);
+            }
+        }
+
+        # Check that there are two bonded atoms
+        if (scalar(@bondedAtoms) != 2) {
+            print "Twice-protonable C atom $atom does not have two bonds.\n";
+            die "ABORTING.\n";
+        }
+
+        # Find the positions for new atoms 1 and 2 directly across $atom from
+        # bonded atoms 1 and 2
+
+        my @vector1 = (0, 0, 0);
+        my @vector2 = (0, 0, 0);
+
+        $vector1[0] = $atomCoords[$atom][0] - $atomCoords[$bondedAtoms[0]][0];
+        $vector1[1] = $atomCoords[$atom][1] - $atomCoords[$bondedAtoms[0]][1];
+        $vector1[2] = $atomCoords[$atom][2] - $atomCoords[$bondedAtoms[0]][2];
+
+        $vector2[0] = $atomCoords[$atom][0] - $atomCoords[$bondedAtoms[1]][0];
+        $vector2[1] = $atomCoords[$atom][1] - $atomCoords[$bondedAtoms[1]][1];
+        $vector2[2] = $atomCoords[$atom][2] - $atomCoords[$bondedAtoms[1]][2];
+
+        # Vector magnitudes
+        my $vecMag1 =
+            sqrt(($vector1[0]**2) + ($vector1[1]**2) + ($vector1[2]**2));
+        my $vecMag2 =
+            sqrt(($vector2[0]**2) + ($vector2[1]**2) + ($vector2[2]**2));
+        # Unit vectors
+        my @vec1 =
+            ($vector1[0]/$vecMag1, $vector1[1]/$vecMag1, $vector1[2]/$vecMag1);
+        my @vec2 =
+            ($vector2[0]/$vecMag2, $vector2[1]/$vecMag2, $vector2[2]/$vecMag2);
+
+        # Place the new Hs along those vectors
+
+        # Find the bond length for the new bonds if different from default
+        if (@newBondTypes) {
+            # ADD CODE HERE TO USE USER-DEFINED BOND TYPES/LENGTHS
+        }
+
+        my @newAtomCoords1;
+        my @newAtomCoords2;
+
+        $newAtomCoords1[0] = ($bondlength * $vec1[0]) + $atomCoords[$atom][0];
+        $newAtomCoords1[1] = ($bondlength * $vec1[1]) + $atomCoords[$atom][1];
+        $newAtomCoords1[2] = ($bondlength * $vec1[2]) + $atomCoords[$atom][2];
+
+        $newAtomCoords2[0] = ($bondlength * $vec2[0]) + $atomCoords[$atom][0];
+        $newAtomCoords2[1] = ($bondlength * $vec2[1]) + $atomCoords[$atom][1];
+        $newAtomCoords2[2] = ($bondlength * $vec2[2]) + $atomCoords[$atom][2];
+
+        # Check whether new atom coords wrap around periodic boundary
+        if ($newAtomCoords1[0] > $xhi) {
+            $newAtomCoords1[0] = $newAtomCoords1[0] - $range[0];
+        } elsif ($newAtomCoords1[0] < $xlo) {
+            $newAtomCoords1[0] = $newAtomCoords1[0] + $range[0];
+        }
+        if ($newAtomCoords1[1] > $yhi) {
+            $newAtomCoords1[1] = $newAtomCoords1[1] - $range[1];
+        } elsif ($newAtomCoords1[1] < $ylo) {
+            $newAtomCoords1[1] = $newAtomCoords1[1] + $range[1];
+        }
+        if ($newAtomCoords1[2] > $zhi) {
+            $newAtomCoords1[2] = $newAtomCoords1[2] - $range[2];
+        } elsif ($newAtomCoords1[2] < $zlo) {
+            $newAtomCoords1[2] = $newAtomCoords1[2] + $range[2];
+        }
+
+        if ($newAtomCoords2[0] > $xhi) {
+            $newAtomCoords2[0] = $newAtomCoords2[0] - $range[0];
+        } elsif ($newAtomCoords2[0] < $xlo) {
+            $newAtomCoords2[0] = $newAtomCoords2[0] + $range[0];
+        }
+        if ($newAtomCoords2[1] > $yhi) {
+            $newAtomCoords2[1] = $newAtomCoords2[1] - $range[1];
+        } elsif ($newAtomCoords2[1] < $ylo) {
+            $newAtomCoords2[1] = $newAtomCoords2[1] + $range[1];
+        }
+        if ($newAtomCoords2[2] > $zhi) {
+            $newAtomCoords2[2] = $newAtomCoords2[2] - $range[2];
+        } elsif ($newAtomCoords2[2] < $zlo) {
+            $newAtomCoords2[2] = $newAtomCoords2[2] + $range[2];
+        }
+
+        my $isOkay1 = &checkNewAtom($atom, @newAtomCoords1);
+        my $isOkay2 = &checkNewAtom($atom, @newAtomCoords2);
+
+        if ($isOkay1) {
+            # STUB -- dividie to two newAtomTypes
+            $elements[$newAtomType] = "nH";
+            # Add new H
+            $totAtoms++;
+            @{$atomCoords[$totAtoms]} = @newAtomCoords1;
+            $atomTypes[$totAtoms] = $newAtomType;
+            $totBonds++;
+            @{$bonds[$totBonds]} = ($atom, $totAtoms);
+            $bondTypes[$totBonds] = $newBondType;
+
+            # STUB -- NEW ANGLE TYPE = 0 until add code
+            # Add new angles
+            foreach my $bondedAtom (@bondedAtoms) {
+                $totAngles++;
+                $angles[$totAngles] = [$bondedAtom, $atom, $totAtoms];
+                $angleTypes[$totAngles] = $newAngleType;
+            }
+
+            # Refresh @bondedAtoms to include just-added H
+            undef(@bondedAtoms);
+            foreach my $bond (1..$totBonds) {
+                if ($atom == $bonds[$bond][0]) {
+                    push(@bondedAtoms, $bonds[$bond][1]);
+                } elsif ($atom == $bonds[$bond][1]) {
+                    push(@bondedAtoms, $bonds[$bond][0]);
+                }
+            }
+        }
+
+        if ($isOkay2) {
+            $elements[$newAtomType] = "nH";
+            # Add new H
+            $totAtoms++;
+            @{$atomCoords[$totAtoms]} = @newAtomCoords2;
+            $atomTypes[$totAtoms] = $newAtomType;
+            $totBonds++;
+            @{$bonds[$totBonds]} = ($atom, $totAtoms);
+            $bondTypes[$totBonds] = $newBondType;
+
+            # STUB -- NEW ANGLE TYPE = 0 until add code
+            # Add new angles
+            foreach my $bondedAtom (@bondedAtoms) {
+                $totAngles++;
+                $angles[$totAngles] = [$bondedAtom, $atom, $totAtoms];
+                $angleTypes[$totAngles] = $newAngleType;
+            }
+        }
+    }
+}
+
+# A subroutine to check whether there are any problems with a new atom
+# (e.g. other atoms too close)
+sub checkNewAtom {
+    my $bondingToAtom = shift(@_);
+    my ($newx, $newy, $newz) = @_;
+    my $problem = 0;
+
+    # See whether a periodic boundary is within the check cutoff distance
+
+    # @boundaryCheck is an array of arrays: first index = axis; for each
+    # axis there are one or two values: (1) -1 (low boundary of axis is
+    # crossed), 1 (high boundary of axis is crossed), 0 (neither boundary
+    # of axis is crossed -- no second value in this case); (2) amount by
+    # which check cutoff overreaches boundary (sign +/- tells direction
+    # of overrun)
+    my @boundaryCheck;
+    if (($newx + $checkCutoff) > $xhi) {
+        $boundaryCheck[0] = [1, ($newx + $checkCutoff) - $xhi];
+    } elsif (($newx - $checkCutoff) < $xlo) {
+        $boundaryCheck[0] = [-1, ($newx - $checkCutoff) - $xlo];
+    } else {
+        $boundaryCheck[0] = [0, 0];
+    }
+    if (($newy + $checkCutoff) > $yhi) {
+        $boundaryCheck[1] = [1, ($newy + $checkCutoff) - $yhi];
+    } elsif (($newx - $checkCutoff) < $xlo) {
+        $boundaryCheck[1] = [-1, ($newy - $checkCutoff) - $ylo];
+    } else {
+        $boundaryCheck[1] = [0, 0];
+    }
+    if (($newz + $checkCutoff) > $zhi) {
+        $boundaryCheck[2] = [1, ($newz + $checkCutoff) - $zhi];
+    } elsif (($newz - $checkCutoff) < $zlo) {
+        $boundaryCheck[2] = [-1, ($newz - $checkCutoff) - $zlo];
+    } else {
+        $boundaryCheck[2] = [0, 0];
+    }
+
+    foreach my $atom (1..$totAtoms) {
+        # Don't consider bondingToAtom itself
+        if ($atom == $bondingToAtom) { next; }
+
+        # Don't consider atoms outside the check cutoff distance
+
+        # x-axis check
+        if ($boundaryCheck[0][0] == 0) {
+            if (($atomCoords[$atom][0] > ($newx + $checkCutoff)) ||
+                ($atomCoords[$atom][0] < ($newx - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[0][0] == 1) {
+            if (($atomCoords[$atom][0] > ($xlo + $boundaryCheck[0][1])) &&
+                ($atomCoords[$atom][0] < ($newx - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[0][0] == -1) {
+            if (($atomCoords[$atom][0] > ($newx + $checkCutoff)) &&
+                ($atomCoords[$atom][0] < ($xhi + $boundaryCheck[0][1]))) {
+                next;
+            }
+        } else {
+            print "Boundary check failure for x-axis.\n";
+            die "ABORTING.\n";
+        }
+
+        # y-axis check
+        if ($boundaryCheck[1][0] == 0) {
+            if (($atomCoords[$atom][1] > ($newy + $checkCutoff)) ||
+                ($atomCoords[$atom][1] < ($newy - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[1][0] == 1) {
+            if (($atomCoords[$atom][1] > ($ylo + $boundaryCheck[1][1])) &&
+                ($atomCoords[$atom][1] < ($newy - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[1][0] == -1) {
+            if (($atomCoords[$atom][1] > ($newy + $checkCutoff)) &&
+                ($atomCoords[$atom][1] < ($yhi + $boundaryCheck[1][1]))) {
+                next;
+            }
+        } else {
+            print "Boundary check failure for y-axis.\n";
+            die "ABORTING.\n";
+        }
+
+        # z-axis check
+        if ($boundaryCheck[2][0] == 0) {
+            if (($atomCoords[$atom][2] > ($newz + $checkCutoff)) ||
+                ($atomCoords[$atom][2] < ($newz - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[2][0] == 1) {
+            if (($atomCoords[$atom][2] > ($zlo + $boundaryCheck[2][1])) &&
+                ($atomCoords[$atom][2] < ($newz - $checkCutoff))) {
+                next;
+            }
+        } elsif ($boundaryCheck[2][0] == -1) {
+            if (($atomCoords[$atom][2] > ($newz + $checkCutoff)) &&
+                ($atomCoords[$atom][2] < ($zhi + $boundaryCheck[2][1]))) {
+                next;
+            }
+        } else {
+            print "Boundary check failure for z-axis.\n";
+            die "ABORTING.\n";
+        }
+
+        # Don't consider atoms directly bonded to bondingToAtom
+        my $bonded = 0;
+        foreach my $bond (1..$totBonds) {
+            if ((($atom == $bonds[$bond][0]) &&
+                 ($bondingToAtom == $bonds[$bond][1])) ||
+                (($atom == $bonds[$bond][1]) &&
+                 ($bondingToAtom == $bonds[$bond][0]))) {
+                $bonded = 1;
+                last;
+            }
+        }
+        if ($bonded) { next; }
+
+        # Check that atom and new atom are not closer than atomCheckDist
+
+        my $x = $atomCoords[$atom][0];
+        my $y = $atomCoords[$atom][1];
+        my $z = $atomCoords[$atom][2];
+
+        # Account for periodic boundaries
+        if ($boundaryCheck[0][0] == 1) {
+            $x = $xhi + $boundaryCheck[0][1];
+        } elsif ($boundaryCheck[0][0] == -1) {
+            $x = $xlo + $boundaryCheck[0][1];
+        }
+        if ($boundaryCheck[1][0] == 1) {
+            $y = $yhi + $boundaryCheck[1][1];
+        } elsif ($boundaryCheck[1][0] == -1) {
+            $y = $ylo + $boundaryCheck[1][1];
+        }
+        if ($boundaryCheck[2][0] == 1) {
+            $z = $zhi + $boundaryCheck[2][1];
+        } elsif ($boundaryCheck[2][0] == -1) {
+            $z = $zlo + $boundaryCheck[2][1];
+        }
+
+        my $distance = &distance($newx, $newy, $newz, $x, $y, $z);
+
+        if ($distance < $atomCheckDist) {
+            &protonationError($bondingToAtom, $atom, $distance,
+                              $newx, $newy, $newz);
+            $problem = 1;
+        }
+    }
+
+    if ($problem) {
+        if ($force) {
+            return(1);
+        } else {
+            return(0);
+        }
+    } else {
+        return(1);
+    }
+}
+
+# A subroutine to find the distance between two given coordinate positions
+# (in three dimensions). Takes as parameters (x1, y1, z1, x2, y2, z2).
+# Returns the distance between the points.
+sub distance {
+    my $x1 = shift(@_);
+    my $y1 = shift(@_);
+    my $z1 = shift(@_);
+
+    my $x2 = shift(@_);
+    my $y2 = shift(@_);
+    my $z2 = shift(@_);
+
+    my $distance = sqrt( ($x1 - $x2)**2 + ($y1 - $y2)**2 + ($z1 - $z2)**2 );
+    return $distance;
+}
+
+# A subroutine to deal with a new atom that fails the checkNewAtom test
+# Logs the problem in the error file
+sub protonationError {
+    my $bondingToAtom = shift(@_);
+    my $conflictAtom = shift(@_);
+    my $distance = shift(@_);
+    my @newAtomCoords = @_;
+
+    print ERRFILE "\nFAILED TO PROTONATE ATOM $bondingToAtom\n";
+    print ERRFILE "\tAtom type: $elements[$atomTypes[$bondingToAtom]] " .
+                  "($atomTypes[$bondingToAtom])\n";
+    print ERRFILE "\tConflict atom: $conflictAtom\n";
+    print ERRFILE "\tConflict atom type: " .
+                  "$elements[$atomTypes[$conflictAtom]] " .
+                  "($atomTypes[$conflictAtom])\n";
+    printf ERRFILE "\tNew atom coords: %.4f %.4f %.4f\n", $newAtomCoords[0],
+                   $newAtomCoords[1], $newAtomCoords[2];
+    printf ERRFILE "\tDistance between new atom and conflict atom: %.4f\n",
+                   $distance;
+}
+
+# A subroutine to print a summary
+#print file names, num new bonds added (and per type, and to which atoms,etc.)
+sub printSummary {
+    my $addedAtoms = $totAtoms - $totAtomsOriginal;
+    my $addedBonds = $totBonds - $totBondsOriginal;
+    my $addedAngles = $totAngles - $totAnglesOriginal;
+
+    # Print a header
+    print OUTFILE "#################################################\n";
+    print OUTFILE "# OUTFILE #######################################\n";
+    print OUTFILE "#################################################\n";
+    print OUTFILE "Title: $title\n";
+    print OUTFILE "Timestep: $timestep\n";
+    print OUTFILE "Date: $date\n";
+    print OUTFILE "\n";
+
+    print OUTFILE "Atoms: $totAtoms\n";
+    print OUTFILE "Bonds: $totBonds\n";
+    print OUTFILE "Angles: $totAngles\n";
+    print OUTFILE "\n";
+
+    print OUTFILE "Original atoms: $totAtomsOriginal\n";
+    print OUTFILE "Original bonds: $totBondsOriginal\n";
+    print OUTFILE "Original angles: $totAnglesOriginal\n";
+    print OUTFILE "\n";
+
+    print OUTFILE "Atoms added: $addedAtoms\n";
+    print OUTFILE "Bonds added: $addedBonds\n";
+    print OUTFILE "Angles added: $addedAngles\n";
+    print OUTFILE "#################################################\n";
+}
+
+# A subroutine to print a LAMMPS data file
+sub printDataFile {
+    select DATAFILE;
+
+    # Print a skeleton header
+
+    print "$title\n\n";
+
+    print "$totAtoms atoms\n";
+    print "$totBonds bonds\n";
+    print "$totAngles angles\n";
+    print "0 dihedrals\n";
+    print "0 impropers\n\n";
+
+    print "$#elements atom types\n";
+    print "***** bond types\n";
+    print "***** angle types\n\n";
+
+    printf "%.3f %.3f xlo xhi\n", $xlo, $xhi;
+    printf "%.3f %.3f ylo yhi\n", $ylo, $yhi;
+    printf "%.3f %.3f zlo zhi\n\n", $zlo, $zhi;
+
+    print "Masses\n\n";
+    foreach my $type (1..$#elements) {
+        print "$type #$elements[$type]_$type\n";
+    }
+    print "\n";
+
+    print "Pair Coeffs\n\n";
+    foreach my $type (1..$#elements) {
+        print "$type #$elements[$type]_$type\n";
+    }
+    print "\n";
+
+    print "Bond Coeffs\n\n";
+
+    print "Angle Coeffs\n\n";
+
+    # Print the atoms section
+    print "Atoms\n\n";
+    foreach my $atom (1..$totAtoms) { #STUB -- add mol num --temp=0 !!!
+        print "$atom 0 $atomTypes[$atom] 0.0 ";
+        printf "%.4f %.4f %.4f ", $atomCoords[$atom][0],
+                        $atomCoords[$atom][1], $atomCoords[$atom][2];
+        print "\#$elements[$atomTypes[$atom]]_" .
+                      "$atomTypes[$atom]\n";
+    }
+
+    print "\n";
+
+    # Print the bonds section
+    print "Bonds\n\n";
+    foreach my $bond (1..$totBonds) {
+        my ($atom1, $atom2) = @{$bonds[$bond]};
+        print "$bond $bondTypes[$bond] $atom1 $atom2 ";
+        print "\#$elements[$atomTypes[$atom1]]_" .
+                      "$atomTypes[$atom1]-" .
+                      "$elements[$atomTypes[$atom2]]_" .
+                      "$atomTypes[$atom2]\n";
+    }
+
+    print "\n";
+
+    # Print angles section
+
+    print "Angles\n\n";
+    foreach my $angle (1..$totAngles) {
+        my ($atom1, $atom2, $atom3) = @{$angles[$angle]};
+        print "$angle $angleTypes[$angle] $angles[$angle][0] " .
+                      "$angles[$angle][1] $angles[$angle][2] ";
+        print "\#$elements[$atomTypes[$atom1]]_" .
+                      "$atomTypes[$atom1]-" .
+                      "$elements[$atomTypes[$atom2]]_" .
+                      "$atomTypes[$atom2]-" .
+                      "$elements[$atomTypes[$atom3]]_" .
+                      "$atomTypes[$atom3]\n";
+    }
+
+    select STDOUT;
+}
+
+# A subroutine to print a PDB file of the new system
+sub printPDB {
+    # Header
+    print PDBFILE "HEADER    $title\n";
+    print PDBFILE "REMARK   1\n";
+    print PDBFILE "REMARK   1 Timestep: $timestep\n";
+    print PDBFILE "REMARK   1 Date: $date\n";
+    print PDBFILE "REMARK   1\n";
+
+    # Atoms section
+    foreach my $atom (1..$totAtoms) {
+        print PDBFILE "ATOM ";
+        printf PDBFILE "%7s", "$atom ";
+#       printf PDBFILE "%5s", "$elements[$atomTypes[$atom]]_$atomTypes[$atom] ";
+        printf PDBFILE "%5s", "$elements[$atomTypes[$atom]] ";
+        print PDBFILE "MOL H   0 ";
+        printf PDBFILE "%12.3f", "$atomCoords[$atom][0] ";
+        printf PDBFILE "%8.3f", "$atomCoords[$atom][1] ";
+        printf PDBFILE "%8.3f", "$atomCoords[$atom][2] ";
+        print PDBFILE " 1.00  0.00 ";
+        printf PDBFILE "%12s", "$elements[$atomTypes[$atom]]0";
+        print PDBFILE "\n";
+    }
+
+    # Bonds section
+    print PDBFILE "TER\n";
+
+    foreach my $atom (1..$totAtoms) {
+        # Find bonded atoms
+        my @bondedAtoms;
+        foreach my $bond (1..$totBonds) {
+            if ($bonds[$bond][0] == $atom) {
+                push(@bondedAtoms, $bonds[$bond][1]);
+            } elsif ($bonds[$bond][1] == $atom) {
+                push(@bondedAtoms, $bonds[$bond][0]);
+            }
+        }
+
+        # Sort bonded atoms
+        @bondedAtoms = sort {$a <=> $b} @bondedAtoms;
+
+        # Print the bonds
+        my $numPrinted = 0;
+        foreach my $bondedAtom (@bondedAtoms) {
+            $numPrinted++;
+            if ($numPrinted == 1) {
+                $numPrinted++;
+                print PDBFILE "CONECT";
+                printf PDBFILE "%5s", "$atom";
+                printf PDBFILE "%5s", "$bondedAtom";
+            } elsif (($numPrinted - 1) % 5 == 0) {
+                $numPrinted++;
+                print PDBFILE "\nCONECT";
+                printf PDBFILE "%5s", "$atom";
+                printf PDBFILE "%5s", "$bondedAtom";
+            } else {
+                printf PDBFILE "%5s", "$bondedAtom";
+            }
+        }
+        if ($numPrinted) {
+            print PDBFILE "\n";
+        }
+    }
+}

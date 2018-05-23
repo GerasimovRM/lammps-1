@@ -1,0 +1,18 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+my $bcRatio;
+my $numOCarborane = 94;
+my $numCH3CH3 = 4;
+my $numCH4 = 4;
+my $numAtoms;
+
+$numAtoms = 24.0*$numOCarborane + 8.0*$numCH3CH3 + 5.0*$numCH4;
+$bcRatio = 10.0*$numOCarborane / (2.0*$numOCarborane + 2.0*$numCH3CH3 +
+                                  1.0*$numCH4);
+
+print STDOUT "bcRatio  = $bcRatio\n";
+print STDOUT "numAtoms = $numAtoms\n";
+

@@ -1,0 +1,17 @@
+#!/usr/bin/perl
+
+# Expected input:
+#   List of molecule names and numbers from the precursor database
+#   Initial box size (x,y,z in Angstroms)
+#   List of break/create fixes to use.
+
+# Example input:
+# 
+
+# Run Packmol
+
+
+# Add CONECT information and atom type REMARKs to the Packmol output
+
+
+# Parse the Packmol output

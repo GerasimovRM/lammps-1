@@ -1,0 +1,27 @@
+REMARK   Accelrys ViewerPro PDB file
+REMARK   Created:  Tue Mar 12 15:56:13 Central Daylight Time 2013
+ATOM      1  C   MOL     1      -0.524   0.426  -7.045  1.00  0.00              
+ATOM      2  H   MOL     1       0.283   1.017  -7.079  1.00  0.00              
+ATOM      3  H   MOL     1      -0.446  -0.198  -6.267  1.00  0.00              
+ATOM      4  H   MOL     1      -1.344   0.989  -6.940  1.00  0.00              
+ATOM      5  C   MOL     1      -0.621  -0.387  -8.349  1.00  0.00              
+ATOM      6  H   MOL     1      -0.699   0.237  -9.127  1.00  0.00              
+ATOM      7  H   MOL     1       0.199  -0.950  -8.453  1.00  0.00              
+ATOM      8  H   MOL     1      -1.428  -0.977  -8.314  1.00  0.00              
+TER
+CONECT    1    2    3    4    5
+CONECT    2    1
+CONECT    3    1
+CONECT    4    1
+CONECT    5    1    6    7    8
+CONECT    6    5
+CONECT    7    5
+CONECT    8    5
+REMARK   1 | 1    1    1    1    0
+REMARK   2 | 2    1
+REMARK   3 | 3    1
+REMARK   4 | 4    1
+REMARK   5 | 5    0    1    1    1
+REMARK   6 | 6    1
+REMARK   7 | 7    1
+REMARK   8 | 8    1
